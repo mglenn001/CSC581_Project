@@ -5,6 +5,7 @@
 
 class Input {
 public:
+    // Check if a keyboard key is currently being pressed
     static bool isKeyPressed(SDL_Scancode key);
 };
 

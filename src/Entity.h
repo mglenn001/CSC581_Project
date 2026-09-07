@@ -13,7 +13,7 @@ public:
     void setPosition(float x, float y);
     void move(float dx, float dy);
 
-    // Setters and Getters for velocity and gravity
+    // Set the entity's movement speed
     void setVelocity(float vx, float vy);
     void setVelocityX(float vx);
     void setVelocityY(float vy);
@@ -21,22 +21,26 @@ public:
     float getVelocityX() const;
     float getVelocityY() const;
 
+    // Turn gravity on or off for this entity
     void setGravityEnabled(bool enabled);
     bool isGravityEnabled() const;
 
+    // Track whether the entity is touching the ground
     void setGrounded(bool grounded);
     bool isGrounded() const;
 
+    // Set the image used to draw the entity
     void setTexture(SDL_Texture* texture);
 
+    // Set up the sprite sheet animation
     void setSpriteSheet(int frameCount, int frameWidth, int frameHeight);
     void updateAnimation();
 
-    // Real-time animation for entities that need an exact frame rate
+    // Set the animation speed when an exact frame rate is needed
     void setAnimationSpeed(float framesPerSecond);
     void updateAnimation(float deltaTime);
 
-    // Getters
+    // Get the entity's position and size
     float getX() const;
     float getY() const;
     float getWidth() const;
@@ -54,13 +58,14 @@ private:
 
     SDL_Texture* texture;
 
+    // Sprite sheet information
     int frameCount;
     int frameWidth;
     int frameHeight;
     int currentFrame;
     int animationCounter;
 
-    // Only used if setAnimationSpeed() is called
+    // Used for animations with a specific frame rate.
     float frameDuration;
     float animationTimer;
     bool useTimedAnimation;

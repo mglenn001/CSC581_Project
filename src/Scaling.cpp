@@ -1,6 +1,6 @@
 #include "Scaling.h"
 
-// Initialize static members
+/// Set the default scaling mode and reference resolution
 ScalingMode Scaling::currentMode = ScalingMode::PIXEL;
 int Scaling::referenceWidth = 1920;
 int Scaling::referenceHeight = 1080;
@@ -17,6 +17,7 @@ void Scaling::setMode(ScalingMode mode)
 
 void Scaling::toggleMode()
 {
+    // Switch between pixel and proportional scaling
     currentMode = (currentMode == ScalingMode::PIXEL)
         ? ScalingMode::PROPORTIONAL
         : ScalingMode::PIXEL;
@@ -24,6 +25,7 @@ void Scaling::toggleMode()
 
 void Scaling::setReferenceResolution(int width, int height)
 {
+    // Only accept positive width and height values
     if (width > 0) {
         referenceWidth = width;
     }
@@ -34,6 +36,7 @@ void Scaling::setReferenceResolution(int width, int height)
 
 void Scaling::getScaleFactors(int currentWidth, int currentHeight, float& scaleX, float& scaleY)
 {
+    // Compare the current window size to the reference resolution
     scaleX = (referenceWidth > 0) ? (float)currentWidth / (float)referenceWidth : 1.0f;
     scaleY = (referenceHeight > 0) ? (float)currentHeight / (float)referenceHeight : 1.0f;
 }

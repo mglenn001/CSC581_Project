@@ -2,6 +2,7 @@
 
 Physics::Physics(float gravity)
 {
+    // Store the gravity value used by the physics system
     this->gravity = gravity;
 }
 
@@ -17,18 +18,19 @@ float Physics::getGravity() const
 
 void Physics::update(Entity& entity, float deltaTime)
 {
+    // Do not apply gravity if it is disabled for this entity
     if (!entity.isGravityEnabled()) {
         return;
     }
 
     float velocityY = entity.getVelocityY();
 
-    // Constant downward acceleration
+    // Increase downward speed based on gravity and time
     velocityY += gravity * deltaTime;
 
     entity.setVelocityY(velocityY);
 
-    // Move entity follow its current velocity
+    // Move the entity based on its current velocity
     entity.move(
         entity.getVelocityX() * deltaTime,
         velocityY * deltaTime
@@ -37,11 +39,14 @@ void Physics::update(Entity& entity, float deltaTime)
 
 void Physics::jump(Entity& entity, float jumpStrength)
 {
+    // The entity can only jump when it is on the ground
     if (!entity.isGrounded()) {
         return;
     }
 
-    // Negative Y moves upward in SDL coordinates
+    // A negative Y velocity moves the entity upward in SDL coordinates
     entity.setVelocityY(-jumpStrength);
+
+    // The entity is no longer on the ground after jumping
     entity.setGrounded(false);
 }

@@ -5,7 +5,7 @@
 
 class Collision {
 public:
-    // Check if two entities are colliding
+    // Check if two entities are touching each other
     static bool checkCollision(const Entity& entityA, const Entity& entityB);
 };
 

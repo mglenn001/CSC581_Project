@@ -7,20 +7,25 @@ Entity::Entity(float x, float y, float width, float height)
     this->width = width;
     this->height = height;
 
+    // Start the entity with no movement
     velocityX = 0.0f;
     velocityY = 0.0f;
+
+    // Gravity is off by default
     gravityEnabled = false;
     grounded = false;
 
+    // No texture is assigned when the entity is created
     texture = nullptr;
 
+    // Default animation values
     frameCount = 1;
     frameWidth = 0;
     frameHeight = 0;
     currentFrame = 0;
     animationCounter = 0;
 
-    // Timed-animation fields, unused unless setAnimationSpeed() is called
+    // These values are only used for timed animation
     frameDuration = 0.0f;
     animationTimer = 0.0f;
     useTimedAnimation = false;
@@ -33,8 +38,8 @@ void Entity::render(SDL_Renderer* renderer)
     float drawWidth = width;
     float drawHeight = height;
 
-    // PIXEL mode (default) leaves everything as-is.
-    // PROPORTIONAL mode resizes/repositions relative to the window's current size vs. the reference resolution.
+    // In PIXEL mode, use the entity's original position and size
+    // In PROPORTIONAL mode, scale the entity to match the window size
     if (Scaling::getMode() == ScalingMode::PROPORTIONAL) {
         int windowWidth = 0;
         int windowHeight = 0;
@@ -50,6 +55,7 @@ void Entity::render(SDL_Renderer* renderer)
         drawHeight = height * scaleY;
     }
 
+    // Create the rectangle where the entity will be drawn
     SDL_FRect destinationRect = {
         drawX,
         drawY,
@@ -59,7 +65,7 @@ void Entity::render(SDL_Renderer* renderer)
 
     if (texture != nullptr) {
 
-        // Animated sprite sheet
+        // Use part of the sprite sheet when animation is enabled
         if (frameCount > 1 && frameWidth > 0 && frameHeight > 0) {
 
             SDL_FRect sourceRect = {
@@ -76,8 +82,7 @@ void Entity::render(SDL_Renderer* renderer)
                 &destinationRect
             );
         }
-
-        // Normal static texture
+        // Draw the full texture when the entity is not animated
         else {
             SDL_RenderTexture(
                 renderer,
@@ -87,8 +92,7 @@ void Entity::render(SDL_Renderer* renderer)
             );
         }
     }
-
-    // No texture: draw a white rectangle
+    // Draw a white rectangle if no texture has been assigned
     else {
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_RenderFillRect(renderer, &destinationRect);
@@ -136,32 +140,36 @@ void Entity::updateAnimation()
 
 void Entity::setAnimationSpeed(float framesPerSecond)
 {
-    // Lets a specific entity opt into exact-fps animation instead of the default fixed-tick counter
+    // Turn off timed animation if the frame rate is not valid
     if (framesPerSecond <= 0.0f) {
         useTimedAnimation = false;
         return;
     }
+    // Convert frames per second into the time for one frame
     frameDuration = 1.0f / framesPerSecond;
     useTimedAnimation = true;
 }
 
 void Entity::updateAnimation(float deltaTime)
 {
+    // A single-frame image does not need animation
     if (frameCount <= 1)
     {
         return;
     }
-    
+    // Use the normal animation method if timed animation is not enabled
     if (!useTimedAnimation) {
         updateAnimation();
         return;
     }
 
+    // Add the time since the last update
     animationTimer += deltaTime;
 
+    // Change to the next frame when enough time has passed
     if (animationTimer >= frameDuration) {
         currentFrame = (currentFrame + 1) % frameCount;
-        animationTimer -= frameDuration; // keep leftover time instead of dropping it
+        animationTimer -= frameDuration; // keep any extra time for the next animation update
     }
 }
 
