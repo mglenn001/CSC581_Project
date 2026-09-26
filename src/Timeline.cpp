@@ -33,7 +33,8 @@ Timeline::Timeline(Timeline* anchor, double tic)
 
 int64_t Timeline::getSourceTime() const
 {
-    // If this timeline is anchored to another timeline, use that timeline as the source of time
+    // If this timeline is anchored to another timeline, use that 
+    // timeline as the source of time
     if (anchor != nullptr) {
         return anchor->getTime();
     }
@@ -48,12 +49,7 @@ int64_t Timeline::getTime() const
         return pausedTime;
     }
 
-    // Extrapolate forward from the last checkpoint using the CURRENT scale.
-    // Because the checkpoint is re-anchored every time scale/tic/pause state
-    // changes, this never has to reapply a new scale to time that already
-    // elapsed under the old scale -- that retroactive rescaling was the bug
-    // that made anchored timelines (like a per-entity local timeline) jump
-    // backward/forward whenever the game speed changed.
+    // Calculate time passed since the last checkpoint
     int64_t elapsedSource = getSourceTime() - checkpointSourceTime;
 
     return checkpointVirtualTime + static_cast<int64_t>(elapsedSource * scale / tic);
@@ -91,9 +87,7 @@ void Timeline::unpause()
         return;
     }
 
-    // Resume counting forward from exactly the time we paused at, using a
-    // fresh checkpoint, so no paused real/source time gets counted as
-    // elapsed once we unpause.
+    // Save state so time resumes smoothly without counting paused time
     checkpointVirtualTime = pausedTime;
     checkpointSourceTime = getSourceTime();
  
@@ -114,9 +108,7 @@ void Timeline::setScale(double scale)
         return;
     }
  
-    // Re-anchor the checkpoint to "now" BEFORE changing scale, so time
-    // already elapsed keeps whatever scale was in effect when it happened,
-    // and only time going forward uses the new scale.
+    // Save current time before changing speed so past time isn't affected
     if (!paused) {
         checkpointVirtualTime = getTime();
         checkpointSourceTime = getSourceTime();
@@ -136,7 +128,7 @@ void Timeline::setTic(double tic)
         return;
     }
  
-    // Same re-anchoring as setScale(), and for the same reason.
+    // Save current time before changing tic size
     if (!paused) {
         checkpointVirtualTime = getTime();
         checkpointSourceTime = getSourceTime();

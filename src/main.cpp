@@ -254,16 +254,11 @@ int main(int argc, char* argv[]) {
     bool facingRight = true; // true if facing right, false if facing left
 
     /* Time Management Setup */
-    // Global timeline: the master clock for the whole game world.
-    // It is the "root" timeline, so it is anchored directly to real time (via SDL_GetTicks).
-    // Pausing/scaling this timeline pauses/scales everything derived from it.
+    // Global timeline: master clock for the whole game world (root, anchored to real time)
     Timeline gameTime;
  
-    // Local timeline: anchored to gameTime instead of real time.
-    // It inherits gameTime's pause/scale by default, but can ALSO be
-    // paused/scaled independently on top of that -- this is what lets us
-    // freeze or slow down just the slime enemy while the rest of the world
-    // (including the player) keeps moving normally.
+    // Local timeline: anchored to gameTime, but can be paused/scaled on its own
+    // too -- lets us freeze/slow just the slime while the rest of the world runs
     Timeline slimeTime(&gameTime);
  
     // Used so a held key only triggers its action once per press, not every frame
@@ -284,16 +279,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Elapsed real time this frame, used only to advance the global timeline itself.
-        // (SDL_GetTicks() is still the ultimate real-time source -- gameTime.getDeltaTime()
-        // reads it internally -- but every other system below now goes through the timeline
-        // instead of touching SDL_GetTicks() directly.)
+        // Delta time from the global timeline, used by the player/physics/animation
         float deltaTime = static_cast<float>(gameTime.getDeltaTime());
 
-        // Elapsed time for the slime specifically, from its own local timeline.
-        // When gameTime is paused this is automatically 0 too, since slimeTime is
-        // anchored to gameTime. When slimeTime is frozen on its own, this is 0
-        // even while gameTime (and the player) keep running.
+        // Delta time from the slime's own local timeline (0 if either timeline is paused)
         float slimeDeltaTime = static_cast<float>(slimeTime.getDeltaTime());
 
         // Press 'T' to toggle window resolution scaling modes

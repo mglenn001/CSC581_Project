@@ -37,13 +37,9 @@ private:
     double scale;
     bool paused;
 
-    // Checkpoint-based accounting: checkpointVirtualTime is this timeline's
-    // own time as of checkpointSourceTime (a reading from the source clock).
-    // getTime() only ever extrapolates forward from that checkpoint using the
-    // CURRENT scale/tic, so it never has to re-apply a new scale to time that
-    // already happened. Every place that changes scale, tic, or pause state
-    // moves the checkpoint up to "now" first, which is what keeps getTime()
-    // continuous (no jumps) across those changes.
+    // Stores the last saved reference time.
+    // We update this whenever settings change so time increases smoothly
+    // without sudden jumps.
     int64_t checkpointSourceTime;
     int64_t checkpointVirtualTime;
 
