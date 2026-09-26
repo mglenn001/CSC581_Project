@@ -3,7 +3,7 @@
     Name: Mia Glenn
     UnityID: mglenn2
     Class: CSC 581 - Game Engine Foundations
-    Date: 6/5/2024
+    Date: 9/30/2026
 */
 
 #include <SDL3/SDL.h>
@@ -16,6 +16,7 @@
 #include "Input.h"
 #include "Collision.h"
 #include "Scaling.h"
+#include "Timeline.h"
 
 /* Global Settings and Constants */
 // Default width and height of the game window (in pixels)
@@ -252,10 +253,28 @@ int main(int argc, char* argv[]) {
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
 
+    /* Time Management Setup */
+    // Global timeline: the master clock for the whole game world.
+    // It is the "root" timeline, so it is anchored directly to real time (via SDL_GetTicks).
+    // Pausing/scaling this timeline pauses/scales everything derived from it.
+    Timeline gameTime;
+ 
+    // Local timeline: anchored to gameTime instead of real time.
+    // It inherits gameTime's pause/scale by default, but can ALSO be
+    // paused/scaled independently on top of that -- this is what lets us
+    // freeze or slow down just the slime enemy while the rest of the world
+    // (including the player) keeps moving normally.
+    Timeline slimeTime(&gameTime);
+ 
+    // Used so a held key only triggers its action once per press, not every frame
+    bool pauseKeyWasPressed = false;
+    bool minusKeyWasPressed = false;
+    bool plusKeyWasPressed = false;
+    bool freezeSlimeKeyWasPressed = false;
+
     /* Main Game Loop */
     bool running = true; // keeps the main game loop running
     SDL_Event event; // holds user inputs/events like clicking 'X' on window
-    Uint64 lastTime = SDL_GetTicks(); // tracks system time in milliseconds to compute delta time
 
     while (running) {
         // Check for system events
@@ -265,10 +284,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Calculate delta time (time passed since last frame in seconds) for smooth movement
-        Uint64 currentTime = SDL_GetTicks();
-        float deltaTime = (currentTime - lastTime) / 1000.0f;
-        lastTime = currentTime;
+        // Elapsed real time this frame, used only to advance the global timeline itself.
+        // (SDL_GetTicks() is still the ultimate real-time source -- gameTime.getDeltaTime()
+        // reads it internally -- but every other system below now goes through the timeline
+        // instead of touching SDL_GetTicks() directly.)
+        float deltaTime = static_cast<float>(gameTime.getDeltaTime());
+
+        // Elapsed time for the slime specifically, from its own local timeline.
+        // When gameTime is paused this is automatically 0 too, since slimeTime is
+        // anchored to gameTime. When slimeTime is frozen on its own, this is 0
+        // even while gameTime (and the player) keep running.
+        float slimeDeltaTime = static_cast<float>(slimeTime.getDeltaTime());
 
         // Press 'T' to toggle window resolution scaling modes
         bool scaleKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_T);
@@ -280,6 +306,64 @@ int main(int argc, char* argv[]) {
             );
         }
         scaleKeyWasPressed = scaleKeyIsPressed;
+
+        // Press 'P' to pause/unpause the global game timeline.
+        // Because slimeTime is anchored to gameTime, this pauses the slime too.
+        bool pauseKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_P);
+        if (pauseKeyIsPressed && !pauseKeyWasPressed) {
+            if (gameTime.isPaused()) {
+                gameTime.unpause();
+                SDL_Log("Game resumed");
+            } else {
+                gameTime.pause();
+                SDL_Log("Game paused");
+            }
+        }
+        pauseKeyWasPressed = pauseKeyIsPressed;
+ 
+        // Press '-' / '+' to slow down / speed up the global game timeline.
+        // Cycles 0.5x -> 1.0x -> 2.0x.
+        bool minusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_MINUS);
+        bool plusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_EQUALS);
+ 
+        if (minusKeyIsPressed && !minusKeyWasPressed) {
+            double currentScale = gameTime.getScale();
+            if (currentScale == 2.0) {
+                gameTime.setScale(1.0);
+            } else if (currentScale == 1.0) {
+                gameTime.setScale(0.5);
+            }
+            SDL_Log("Game time scale: %.1fx", gameTime.getScale());
+        }
+ 
+        if (plusKeyIsPressed && !plusKeyWasPressed) {
+            double currentScale = gameTime.getScale();
+            if (currentScale == 0.5) {
+                gameTime.setScale(1.0);
+            } else if (currentScale == 1.0) {
+                gameTime.setScale(2.0);
+            }
+            SDL_Log("Game time scale: %.1fx", gameTime.getScale());
+        }
+ 
+        minusKeyWasPressed = minusKeyIsPressed;
+        plusKeyWasPressed = plusKeyIsPressed;
+ 
+        // Press 'F' to freeze/unfreeze ONLY the slime's local timeline.
+        // This demonstrates a local timeline being manipulated independently
+        // of the global one: the player keeps moving at normal speed while
+        // the slime is frozen in place.
+        bool freezeSlimeKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_F);
+        if (freezeSlimeKeyIsPressed && !freezeSlimeKeyWasPressed) {
+            if (slimeTime.isPaused()) {
+                slimeTime.unpause();
+                SDL_Log("Slime timeline resumed");
+            } else {
+                slimeTime.pause();
+                SDL_Log("Slime timeline frozen");
+            }
+        }
+        freezeSlimeKeyWasPressed = freezeSlimeKeyIsPressed;
  
         // Player inputs & movement
         const float WALK_SPEED = 200.0f;
@@ -420,8 +504,9 @@ int main(int argc, char* argv[]) {
             warriorCurrentFrame = (warriorCurrentFrame + 1) % maxFrames;
         }
 
-        // Update slime enemy patrol & animation
-        slimeX += slimeDir * slimeSpeed * deltaTime;
+        // Update slime enemy patrol & animation using ITS OWN local timeline,
+        // so freezing/scaling slimeTime affects only the slime.
+        slimeX += slimeDir * slimeSpeed * slimeDeltaTime;
         // Turn around at patrol boundaries
         if (slimeX > 800.0f) {
             slimeDir = -1.0f; // go left
@@ -429,7 +514,7 @@ int main(int argc, char* argv[]) {
             slimeDir = 1.0f; // go right
         }
 
-        slimeAnimTimer += deltaTime;
+        slimeAnimTimer += slimeDeltaTime;
         if (slimeAnimTimer >= (1.0f / 8.0f)) {
             slimeAnimTimer = 0.0f;
             slimeCurrentFrame = (slimeCurrentFrame + 1) % SLIME_WALK_FRAMES;
@@ -674,7 +759,7 @@ int main(int argc, char* argv[]) {
         portal.updateAnimation(deltaTime);
         portal.render(renderer);
 
-        /* Draw Slime Enemy*/
+        /* Draw Slime Enemy */
         if (slimeTexture) {
             // Cut out the current active frame from the slime image grid
             SDL_FRect slimeSrc = {
