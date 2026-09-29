@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <string>
 #include <thread>
+#include <mutex>
 
 #include "Entity.h"
 #include "Physics.h"
@@ -51,6 +52,48 @@ enum class CharacterState {
     Jump,
     Fall
 };
+
+// Struct for concurrent frame processing tasks
+struct FrameRenderTask {
+    float slimeX;
+    float slimeY;
+    int slimeFrame;
+    float slimeDir;
+    int warriorRow;
+    int warriorFrame;
+};
+
+// Worker function: Concurrently computes animated render parameters for game objects
+void prepareFrameData(
+    float slimeX, float slimeY, float slimeDir, float slimeDeltaTime, float& slimeAnimTimer,
+    float deltaTime, float warriorAnimTimer, int warriorCurrentFrame, int maxFrames, float animFPS,
+    FrameRenderTask& taskResult, std::mutex& taskMutex) 
+{
+    // Slime movement & animation frame calculation
+    float computedSlimeX = slimeX + (slimeDir * 60.0f * slimeDeltaTime);
+    
+    slimeAnimTimer += slimeDeltaTime;
+    int computedSlimeFrame = (int)(slimeAnimTimer / (1.0f / 8.0f)) % SLIME_WALK_FRAMES;
+    if (slimeAnimTimer >= (1.0f / 8.0f)) {
+        slimeAnimTimer = 0.0f; // Reset timer
+    }
+
+    // Warrior animation frame calculation
+    warriorAnimTimer += deltaTime;
+    int computedWarriorFrame = warriorCurrentFrame;
+    if (warriorAnimTimer >= (1.0f / animFPS)) {
+        warriorAnimTimer = 0.0f; // Reset timer
+        computedWarriorFrame = (warriorCurrentFrame + 1) % maxFrames;
+    }
+
+    // Safely write prepared calculations into task result container
+    std::lock_guard<std::mutex> lock(taskMutex);
+    taskResult.slimeX = computedSlimeX;
+    taskResult.slimeY = slimeY;
+    taskResult.slimeFrame = computedSlimeFrame;
+    taskResult.slimeDir = slimeDir;
+    taskResult.warriorFrame = computedWarriorFrame;
+}
 
 int main(int argc, char* argv[]) {
     // Each client needs its own ID: ./main 1  and  ./main 2
@@ -310,7 +353,6 @@ int main(int argc, char* argv[]) {
 
         // Delta time from the global timeline, used by the player/physics/animation
         float deltaTime = static_cast<float>(gameTime.getDeltaTime());
-
         // Delta time from the slime's own local timeline (0 if either timeline is paused)
         float slimeDeltaTime = static_cast<float>(slimeTime.getDeltaTime());
 
@@ -522,7 +564,34 @@ int main(int argc, char* argv[]) {
             warriorCurrentFrame = (warriorCurrentFrame + 1) % maxFrames;
         }
 
-        // Give the networking thread our latest player state to send to the server
+        // Non-trivial concurrent frame generation using background worker thread
+        FrameRenderTask preparedTask;
+        std::mutex taskMutex;
+
+        // Launch worker thread to calculate entity animation frames concurrently
+        std::thread framePrepThread(
+            prepareFrameData,
+            slimeX, slimeY, slimeDir, slimeDeltaTime, std::ref(slimeAnimTimer),
+            deltaTime, std::ref(warriorAnimTimer), warriorCurrentFrame, maxFrames, animFPS,
+            std::ref(preparedTask), std::ref(taskMutex)
+        );
+
+        // Wait for concurrency worker thread to complete calculation before rendering
+        framePrepThread.join();
+
+        // Apply worker thread results
+        warriorCurrentFrame = preparedTask.warriorFrame;
+        slimeX = preparedTask.slimeX;
+        slimeCurrentFrame = preparedTask.slimeFrame;
+
+        // Turn around slime at boundaries
+        if (slimeX > 800.0f) {
+            slimeDir = -1.0f;
+        } else if (slimeX < 550.0f) {
+            slimeDir = 1.0f;
+        }
+
+        // Give the networking thread our latest player state
         if (online) {
             std::lock_guard<std::mutex> lock(sharedData.playerMutex);
             sharedData.playerX = player.getX();
@@ -530,22 +599,6 @@ int main(int argc, char* argv[]) {
             sharedData.playerFacingRight = facingRight;
             sharedData.playerRow = row;
             sharedData.playerFrame = warriorCurrentFrame;
-        }
-
-        // Update slime enemy patrol & animation using ITS OWN local timeline,
-        // so freezing/scaling slimeTime affects only the slime.
-        slimeX += slimeDir * slimeSpeed * slimeDeltaTime;
-        // Turn around at patrol boundaries
-        if (slimeX > 800.0f) {
-            slimeDir = -1.0f; // go left
-        } else if (slimeX < 550.0f) {
-            slimeDir = 1.0f; // go right
-        }
-
-        slimeAnimTimer += slimeDeltaTime;
-        if (slimeAnimTimer >= (1.0f / 8.0f)) {
-            slimeAnimTimer = 0.0f;
-            slimeCurrentFrame = (slimeCurrentFrame + 1) % SLIME_WALK_FRAMES;
         }
 
         /* Render Game Objects */
