@@ -2,14 +2,17 @@
     2D Individual game
     Name: Mia Glenn
     UnityID: mglenn2
+    Team: 8
     Class: CSC 581 - Game Engine Foundations
     Date: 9/30/2026
 */
-
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3_image/SDL_image.h>
 #include <vector>
+#include <cstdlib>
+#include <string>
+#include <thread>
 
 #include "Entity.h"
 #include "Physics.h"
@@ -17,6 +20,8 @@
 #include "Collision.h"
 #include "Scaling.h"
 #include "Timeline.h"
+#include "SharedData.h"
+#include "Networking.h"
 
 /* Global Settings and Constants */
 // Default width and height of the game window (in pixels)
@@ -48,6 +53,14 @@ enum class CharacterState {
 };
 
 int main(int argc, char* argv[]) {
+    // Each client needs its own ID: ./main 1  and  ./main 2
+    // With no ID the game runs offline, like before.
+    int clientID = 0;
+    if (argc >= 2) {
+        clientID = std::atoi(argv[1]);
+    }
+    bool online = (clientID > 0);
+
     // Start up SDL's video system
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("Could not initialize SDL: %s", SDL_GetError());
@@ -59,14 +72,17 @@ int main(int argc, char* argv[]) {
     SDL_Renderer *renderer = nullptr;
 
     // Create the game window and renderer
+    // Show the client ID in the window title so it is easy to tell windows apart
+    std::string windowTitle = online ? "Game Engine - Client " + std::to_string(clientID) : "Game Engine";
+ 
     if (!SDL_CreateWindowAndRenderer(
-            "Game Engine",
+            windowTitle.c_str(),
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             SDL_WINDOW_RESIZABLE,
             &window,
             &renderer)) {
-
+ 
         SDL_Log("Could not create window/renderer: %s", SDL_GetError());
         SDL_Quit();
         return 1;
@@ -266,6 +282,19 @@ int main(int argc, char* argv[]) {
     bool minusKeyWasPressed = false;
     bool plusKeyWasPressed = false;
     bool freezeSlimeKeyWasPressed = false;
+
+    /* Networking Setup */
+    // Data shared with the networking thread
+    SharedData sharedData;
+    std::thread networkThread;
+ 
+    if (online) {
+        // The networking thread talks to the server so the game loop never waits on the network
+        networkThread = std::thread(networkingThread, std::ref(sharedData), clientID);
+        SDL_Log("Client %d started. Connecting to server...", clientID);
+    } else {
+        SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
+    }
 
     /* Main Game Loop */
     bool running = true; // keeps the main game loop running
@@ -491,6 +520,16 @@ int main(int argc, char* argv[]) {
         if (warriorAnimTimer >= (1.0f / animFPS)) {
             warriorAnimTimer = 0.0f;
             warriorCurrentFrame = (warriorCurrentFrame + 1) % maxFrames;
+        }
+
+        // Give the networking thread our latest player state to send to the server
+        if (online) {
+            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+            sharedData.playerX = player.getX();
+            sharedData.playerY = player.getY();
+            sharedData.playerFacingRight = facingRight;
+            sharedData.playerRow = row;
+            sharedData.playerFrame = warriorCurrentFrame;
         }
 
         // Update slime enemy patrol & animation using ITS OWN local timeline,
@@ -769,6 +808,36 @@ int main(int argc, char* argv[]) {
             SDL_RenderTextureRotated(renderer, slimeTexture, &slimeSrc, &slimeDst, 0.0, nullptr, slimeFlip);
         }
 
+        /* Draw Other Players (controlled by the other clients) */
+        if (online && warriorTexture) {
+            // Copy the list so we don't hold the lock while drawing
+            std::unordered_map<int, RemotePlayerState> others;
+            {
+                std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+                others = sharedData.remotePlayers;
+            }
+ 
+            // Tint other players blue so they look different from our own warrior
+            SDL_SetTextureColorMod(warriorTexture, 120, 170, 255);
+ 
+            for (const auto& entry : others) {
+                const RemotePlayerState& other = entry.second;
+ 
+                SDL_FRect otherSrc = {
+                    (float)(other.frame * WARRIOR_FRAME_W),
+                    (float)(other.row * WARRIOR_FRAME_H),
+                    (float)WARRIOR_FRAME_W,
+                    (float)WARRIOR_FRAME_H
+                };
+                SDL_FRect otherDst = scaleRect({ other.x, other.y, player.getWidth(), player.getHeight() });
+                SDL_FlipMode otherFlip = other.facingRight ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+                SDL_RenderTextureRotated(renderer, warriorTexture, &otherSrc, &otherDst, 0.0, nullptr, otherFlip);
+            }
+ 
+            // Back to normal color for our own warrior
+            SDL_SetTextureColorMod(warriorTexture, 255, 255, 255);
+        }
+
         /* Draw Warrior Player */
         if (warriorTexture) {
             // Cut out the current active animation frame based on row and column
@@ -792,6 +861,12 @@ int main(int argc, char* argv[]) {
 
         // Display everything drawn during this frame onto the screen
         SDL_RenderPresent(renderer);
+    }
+
+    // Stop the networking thread before cleaning up
+    sharedData.running = false;
+    if (networkThread.joinable()) {
+        networkThread.join();
     }
 
     // Clean up and exit
