@@ -17,9 +17,13 @@ struct RemotePlayerState {
 struct SharedData {
     // Set to false to tell the networking thread to stop
     std::atomic<bool> running{true};
-
     // True while the server is answering us
     std::atomic<bool> connected{false};
+
+    // Section 4: Current scale of game timeline (defaults to 1.0)
+    std::atomic<float> currentTimeScale{1.0f};
+    // Section 4: Server-authoritative platform position
+    float movingPlatformX = 600.0f;
 
     // This client's own player (written by the game loop)
     float playerX = 0.0f;
@@ -30,7 +34,6 @@ struct SharedData {
 
     // The other players, as last reported by the server
     std::unordered_map<int, RemotePlayerState> remotePlayers;
-
     // Protects everything above that is not atomic
     std::mutex playerMutex;
 };

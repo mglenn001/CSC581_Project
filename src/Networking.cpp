@@ -7,29 +7,17 @@
 #include <string>
 #include <thread>
 
-// The server listens on this port
-#define SERVER_ADDRESS "tcp://localhost:5555"
-
-// How long to wait for a reply before trying again (milliseconds)
-#define REPLY_TIMEOUT_MS 500
-
-// Make a fresh REQ socket connected to the server
-static zmq::socket_t makeSocket(zmq::context_t& context)
-{
-    zmq::socket_t socket(context, zmq::socket_type::req);
-    socket.set(zmq::sockopt::linger, 0); // don't hang on exit
-    socket.set(zmq::sockopt::rcvtimeo, REPLY_TIMEOUT_MS); // don't wait forever
-    socket.connect(SERVER_ADDRESS);
-    return socket;
-}
-
 void networkingThread(SharedData& sharedData, int clientID)
 {
     try {
         zmq::context_t context(1);
-        zmq::socket_t requester = makeSocket(context);
-
-        std::cout << "Client " << clientID << " networking thread started." << std::endl;
+        // Client 1 connects to 5556, Client 2 connects to 5557, etc.
+        std::string serverAddr = "tcp://localhost:" + std::to_string(5555 + clientID);
+        
+        zmq::socket_t requester(context, zmq::socket_type::req);
+        requester.set(zmq::sockopt::linger, 0);
+        requester.set(zmq::sockopt::rcvtimeo, 500);
+        requester.connect(serverAddr);
 
         while (sharedData.running.load()) {
             // Copy our player's latest state
@@ -47,8 +35,7 @@ void networkingThread(SharedData& sharedData, int clientID)
 
             // Message format: id x y facingRight row frame
             std::ostringstream request;
-            request << clientID << " " << x << " " << y << " "
-                    << (facingRight ? 1 : 0) << " " << row << " " << frame;
+            request << clientID << " " << x << " " << y << " " << (facingRight ? 1 : 0) << " " << row << " " << frame;
             requester.send(zmq::buffer(request.str()), zmq::send_flags::none);
 
             // Wait for the server's reply
@@ -56,11 +43,10 @@ void networkingThread(SharedData& sharedData, int clientID)
             auto result = requester.recv(reply, zmq::recv_flags::none);
 
             if (!result) {
-                // No reply (server is down or slow). A REQ socket can't send
-                // again until it gets a reply, so throw it away and make a new one.
                 sharedData.connected = false;
                 requester.close();
-                requester = makeSocket(context);
+                requester = zmq::socket_t(context, zmq::socket_type::req);
+                requester.connect(serverAddr);
                 continue;
             }
             sharedData.connected = true;
@@ -73,12 +59,21 @@ void networkingThread(SharedData& sharedData, int clientID)
             std::unordered_map<int, RemotePlayerState> players;
 
             while (std::getline(entries, entry, ';')) {
+                if (entry.rfind("PLAT", 0) == 0) {
+                    std::stringstream platStream(entry);
+                    std::string label;
+                    float platX;
+                    if (platStream >> label >> platX) {
+                        std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+                        sharedData.movingPlatformX = platX;
+                    }
+                    continue;
+                }
+
                 std::stringstream fields(entry);
                 int id, facing, remoteRow, remoteFrame;
                 float remoteX, remoteY;
-
                 if (fields >> id >> remoteX >> remoteY >> facing >> remoteRow >> remoteFrame) {
-                    // Skip ourselves, the game already draws our own player
                     if (id != clientID) {
                         players[id] = { remoteX, remoteY, facing != 0, remoteRow, remoteFrame };
                     }
@@ -91,8 +86,9 @@ void networkingThread(SharedData& sharedData, int clientID)
                 sharedData.remotePlayers = players;
             }
 
-            // About 60 updates per second
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            // Sync sleep rate to timeline scale for asynchronous demonstration
+            int sleepMs = static_cast<int>(16.0 / sharedData.currentTimeScale.load());
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, sleepMs)));
         }
 
         requester.close();

@@ -591,6 +591,16 @@ int main(int argc, char* argv[]) {
             slimeDir = 1.0f;
         }
 
+        // Keep sharedData updated with current time scale so networking thread syncs its loop rate
+        sharedData.currentTimeScale.store(static_cast<float>(gameTime.getScale()));
+
+        // Read server-authoritative moving platform position
+        float currentPlatX = 600.0f;
+        {
+            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+            currentPlatX = sharedData.movingPlatformX;
+        }
+
         // Give the networking thread our latest player state
         if (online) {
             std::lock_guard<std::mutex> lock(sharedData.playerMutex);
