@@ -2,20 +2,27 @@
     2D Individual game
     Name: Mia Glenn
     UnityID: mglenn2
+    Team: 8
     Class: CSC 581 - Game Engine Foundations
-    Date: 6/5/2024
+    Date: 9/30/2026
 */
-
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3_image/SDL_image.h>
 #include <vector>
+#include <cstdlib>
+#include <string>
+#include <thread>
+#include <mutex>
 
 #include "Entity.h"
 #include "Physics.h"
 #include "Input.h"
 #include "Collision.h"
 #include "Scaling.h"
+#include "Timeline.h"
+#include "SharedData.h"
+#include "Networking.h"
 
 /* Global Settings and Constants */
 // Default width and height of the game window (in pixels)
@@ -46,7 +53,57 @@ enum class CharacterState {
     Fall
 };
 
+// Struct for concurrent frame processing tasks
+struct FrameRenderTask {
+    float slimeX;
+    float slimeY;
+    int slimeFrame;
+    float slimeDir;
+    int warriorRow;
+    int warriorFrame;
+};
+
+// Worker function: Concurrently computes animated render parameters for game objects
+void prepareFrameData(
+    float slimeX, float slimeY, float slimeDir, float slimeDeltaTime, float& slimeAnimTimer,
+    float deltaTime, float warriorAnimTimer, int warriorCurrentFrame, int maxFrames, float animFPS,
+    FrameRenderTask& taskResult, std::mutex& taskMutex) 
+{
+    // Slime movement & animation frame calculation
+    float computedSlimeX = slimeX + (slimeDir * 60.0f * slimeDeltaTime);
+    
+    slimeAnimTimer += slimeDeltaTime;
+    int computedSlimeFrame = (int)(slimeAnimTimer / (1.0f / 8.0f)) % SLIME_WALK_FRAMES;
+    if (slimeAnimTimer >= (1.0f / 8.0f)) {
+        slimeAnimTimer = 0.0f; // Reset timer
+    }
+
+    // Warrior animation frame calculation
+    warriorAnimTimer += deltaTime;
+    int computedWarriorFrame = warriorCurrentFrame;
+    if (warriorAnimTimer >= (1.0f / animFPS)) {
+        warriorAnimTimer = 0.0f; // Reset timer
+        computedWarriorFrame = (warriorCurrentFrame + 1) % maxFrames;
+    }
+
+    // Safely write prepared calculations into task result container
+    std::lock_guard<std::mutex> lock(taskMutex);
+    taskResult.slimeX = computedSlimeX;
+    taskResult.slimeY = slimeY;
+    taskResult.slimeFrame = computedSlimeFrame;
+    taskResult.slimeDir = slimeDir;
+    taskResult.warriorFrame = computedWarriorFrame;
+}
+
 int main(int argc, char* argv[]) {
+    // Each client needs its own ID: ./main 1  and  ./main 2
+    // With no ID the game runs offline, like before.
+    int clientID = 0;
+    if (argc >= 2) {
+        clientID = std::atoi(argv[1]);
+    }
+    bool online = (clientID > 0);
+
     // Start up SDL's video system
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("Could not initialize SDL: %s", SDL_GetError());
@@ -58,14 +115,17 @@ int main(int argc, char* argv[]) {
     SDL_Renderer *renderer = nullptr;
 
     // Create the game window and renderer
+    // Show the client ID in the window title so it is easy to tell windows apart
+    std::string windowTitle = online ? "Game Engine - Client " + std::to_string(clientID) : "Game Engine";
+ 
     if (!SDL_CreateWindowAndRenderer(
-            "Game Engine",
+            windowTitle.c_str(),
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             SDL_WINDOW_RESIZABLE,
             &window,
             &renderer)) {
-
+ 
         SDL_Log("Could not create window/renderer: %s", SDL_GetError());
         SDL_Quit();
         return 1;
@@ -236,6 +296,15 @@ int main(int argc, char* argv[]) {
     float rightPlatY = groundY - (tileSize * 5.2f);
     platforms.push_back(Entity(1250.0f, rightPlatY, tileSize * 3.0f, tileSize));
 
+    // Section 4: Server-driven moving platform.
+    // Its X position comes ONLY from the server (sharedData.movingPlatformX),
+    // never from this client's own timeline, so it stays in the same place for
+    // every client no matter how fast or slow that client is running.
+    // It shuttles between floating island A and floating island B.
+    const float MOVING_PLAT_W = tileSize * 2.0f;
+    Entity movingPlatform(600.0f, islandBY, MOVING_PLAT_W, tileSize);
+    float previousPlatX = 600.0f; // last frame's X, used to carry the player along
+
     // Physics manager instance for applying movement and gravity updates
     Physics physics;
 
@@ -252,10 +321,36 @@ int main(int argc, char* argv[]) {
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
 
+    /* Time Management Setup */
+    // Global timeline: master clock for the whole game world (root, anchored to real time)
+    Timeline gameTime;
+ 
+    // Local timeline: anchored to gameTime, but can be paused/scaled on its own
+    // too -- lets us freeze/slow just the slime while the rest of the world runs
+    Timeline slimeTime(&gameTime);
+ 
+    // Used so a held key only triggers its action once per press, not every frame
+    bool pauseKeyWasPressed = false;
+    bool minusKeyWasPressed = false;
+    bool plusKeyWasPressed = false;
+    bool freezeSlimeKeyWasPressed = false;
+
+    /* Networking Setup */
+    // Data shared with the networking thread
+    SharedData sharedData;
+    std::thread networkThread;
+ 
+    if (online) {
+        // The networking thread talks to the server so the game loop never waits on the network
+        networkThread = std::thread(networkingThread, std::ref(sharedData), clientID);
+        SDL_Log("Client %d started. Connecting to server...", clientID);
+    } else {
+        SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
+    }
+
     /* Main Game Loop */
     bool running = true; // keeps the main game loop running
     SDL_Event event; // holds user inputs/events like clicking 'X' on window
-    Uint64 lastTime = SDL_GetTicks(); // tracks system time in milliseconds to compute delta time
 
     while (running) {
         // Check for system events
@@ -265,10 +360,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Calculate delta time (time passed since last frame in seconds) for smooth movement
-        Uint64 currentTime = SDL_GetTicks();
-        float deltaTime = (currentTime - lastTime) / 1000.0f;
-        lastTime = currentTime;
+        // Delta time from the global timeline, used by the player/physics/animation
+        float deltaTime = static_cast<float>(gameTime.getDeltaTime());
+        // Delta time from the slime's own local timeline (0 if either timeline is paused)
+        float slimeDeltaTime = static_cast<float>(slimeTime.getDeltaTime());
 
         // Press 'T' to toggle window resolution scaling modes
         bool scaleKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_T);
@@ -280,6 +375,64 @@ int main(int argc, char* argv[]) {
             );
         }
         scaleKeyWasPressed = scaleKeyIsPressed;
+
+        // Press 'P' to pause/unpause the global game timeline.
+        // Because slimeTime is anchored to gameTime, this pauses the slime too.
+        bool pauseKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_P);
+        if (pauseKeyIsPressed && !pauseKeyWasPressed) {
+            if (gameTime.isPaused()) {
+                gameTime.unpause();
+                SDL_Log("Game resumed");
+            } else {
+                gameTime.pause();
+                SDL_Log("Game paused");
+            }
+        }
+        pauseKeyWasPressed = pauseKeyIsPressed;
+ 
+        // Press '-' / '+' to slow down / speed up the global game timeline.
+        // Cycles 0.5x -> 1.0x -> 2.0x.
+        bool minusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_MINUS);
+        bool plusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_EQUALS);
+ 
+        if (minusKeyIsPressed && !minusKeyWasPressed) {
+            double currentScale = gameTime.getScale();
+            if (currentScale == 2.0) {
+                gameTime.setScale(1.0);
+            } else if (currentScale == 1.0) {
+                gameTime.setScale(0.5);
+            }
+            SDL_Log("Game time scale: %.1fx", gameTime.getScale());
+        }
+ 
+        if (plusKeyIsPressed && !plusKeyWasPressed) {
+            double currentScale = gameTime.getScale();
+            if (currentScale == 0.5) {
+                gameTime.setScale(1.0);
+            } else if (currentScale == 1.0) {
+                gameTime.setScale(2.0);
+            }
+            SDL_Log("Game time scale: %.1fx", gameTime.getScale());
+        }
+ 
+        minusKeyWasPressed = minusKeyIsPressed;
+        plusKeyWasPressed = plusKeyIsPressed;
+ 
+        // Press 'F' to freeze/unfreeze ONLY the slime's local timeline.
+        // This demonstrates a local timeline being manipulated independently
+        // of the global one: the player keeps moving at normal speed while
+        // the slime is frozen in place.
+        bool freezeSlimeKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_F);
+        if (freezeSlimeKeyIsPressed && !freezeSlimeKeyWasPressed) {
+            if (slimeTime.isPaused()) {
+                slimeTime.unpause();
+                SDL_Log("Slime timeline resumed");
+            } else {
+                slimeTime.pause();
+                SDL_Log("Slime timeline frozen");
+            }
+        }
+        freezeSlimeKeyWasPressed = freezeSlimeKeyIsPressed;
  
         // Player inputs & movement
         const float WALK_SPEED = 200.0f;
@@ -316,6 +469,17 @@ int main(int argc, char* argv[]) {
         // Apply physics
         physics.update(player, deltaTime);
 
+        // Read the server-authoritative platform position (written by the networking thread)
+        float currentPlatX = previousPlatX;
+        {
+            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+            currentPlatX = sharedData.movingPlatformX;
+        }
+        // How far the platform moved since last frame (used to carry a rider)
+        float platDeltaX = currentPlatX - previousPlatX;
+        movingPlatform.setPosition(currentPlatX, islandBY);
+        previousPlatX = currentPlatX;
+
         // Collision checks
         bool isGrounded = false;
         float playerX = player.getX();
@@ -337,6 +501,18 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 }
+            }
+        }
+
+        // Landing on the moving platform (stand on top and get carried along with it)
+        if (!isGrounded && player.getVelocityY() >= 0.0f &&
+            Collision::checkCollision(player, movingPlatform)) {
+            float previousY = playerY - (player.getVelocityY() * deltaTime);
+            if (previousY + playerH <= movingPlatform.getY() + 16.0f) {
+                player.setPosition(playerX + platDeltaX, movingPlatform.getY() - playerH);
+                player.setVelocityY(0.0f);
+                player.setGrounded(true);
+                isGrounded = true;
             }
         }
 
@@ -420,19 +596,44 @@ int main(int argc, char* argv[]) {
             warriorCurrentFrame = (warriorCurrentFrame + 1) % maxFrames;
         }
 
-        // Update slime enemy patrol & animation
-        slimeX += slimeDir * slimeSpeed * deltaTime;
-        // Turn around at patrol boundaries
+        // Non-trivial concurrent frame generation using background worker thread
+        FrameRenderTask preparedTask;
+        std::mutex taskMutex;
+
+        // Launch worker thread to calculate entity animation frames concurrently
+        std::thread framePrepThread(
+            prepareFrameData,
+            slimeX, slimeY, slimeDir, slimeDeltaTime, std::ref(slimeAnimTimer),
+            deltaTime, std::ref(warriorAnimTimer), warriorCurrentFrame, maxFrames, animFPS,
+            std::ref(preparedTask), std::ref(taskMutex)
+        );
+
+        // Wait for concurrency worker thread to complete calculation before rendering
+        framePrepThread.join();
+
+        // Apply worker thread results
+        warriorCurrentFrame = preparedTask.warriorFrame;
+        slimeX = preparedTask.slimeX;
+        slimeCurrentFrame = preparedTask.slimeFrame;
+
+        // Turn around slime at boundaries
         if (slimeX > 800.0f) {
-            slimeDir = -1.0f; // go left
+            slimeDir = -1.0f;
         } else if (slimeX < 550.0f) {
-            slimeDir = 1.0f; // go right
+            slimeDir = 1.0f;
         }
 
-        slimeAnimTimer += deltaTime;
-        if (slimeAnimTimer >= (1.0f / 8.0f)) {
-            slimeAnimTimer = 0.0f;
-            slimeCurrentFrame = (slimeCurrentFrame + 1) % SLIME_WALK_FRAMES;
+        // Keep sharedData updated with current time scale so networking thread syncs its loop rate
+        sharedData.currentTimeScale.store(static_cast<float>(gameTime.getScale()));
+
+        // Give the networking thread our latest player state
+        if (online) {
+            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+            sharedData.playerX = player.getX();
+            sharedData.playerY = player.getY();
+            sharedData.playerFacingRight = facingRight;
+            sharedData.playerRow = row;
+            sharedData.playerFrame = warriorCurrentFrame;
         }
 
         /* Render Game Objects */
@@ -608,6 +809,14 @@ int main(int argc, char* argv[]) {
         scaledTileRect = scaleRect(rightPlatRect);
         SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect);
 
+        // Server-driven moving platform (Section 4)
+        SDL_FRect movingPlatRect = { movingPlatform.getX(), movingPlatform.getY(), tileSize, tileSize };
+        scaledTileRect = scaleRect(movingPlatRect);
+        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect); // Left end
+        movingPlatRect.x += tileSize;
+        scaledTileRect = scaleRect(movingPlatRect);
+        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect); // Right end
+
         /* Draw Decorative Objects */
         const float boxSize = 56.0f;
         SDL_FRect box1Dst = scaleRect({ 820.0f, groundY - boxSize, boxSize, boxSize });
@@ -674,7 +883,7 @@ int main(int argc, char* argv[]) {
         portal.updateAnimation(deltaTime);
         portal.render(renderer);
 
-        /* Draw Slime Enemy*/
+        /* Draw Slime Enemy */
         if (slimeTexture) {
             // Cut out the current active frame from the slime image grid
             SDL_FRect slimeSrc = {
@@ -693,6 +902,36 @@ int main(int argc, char* argv[]) {
             // Flip texture horizontally when walking left
             SDL_FlipMode slimeFlip = (slimeDir < 0.0f) ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
             SDL_RenderTextureRotated(renderer, slimeTexture, &slimeSrc, &slimeDst, 0.0, nullptr, slimeFlip);
+        }
+
+        /* Draw Other Players (controlled by the other clients) */
+        if (online && warriorTexture) {
+            // Copy the list so we don't hold the lock while drawing
+            std::unordered_map<int, RemotePlayerState> others;
+            {
+                std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+                others = sharedData.remotePlayers;
+            }
+ 
+            // Tint other players blue so they look different from our own warrior
+            SDL_SetTextureColorMod(warriorTexture, 120, 170, 255);
+ 
+            for (const auto& entry : others) {
+                const RemotePlayerState& other = entry.second;
+ 
+                SDL_FRect otherSrc = {
+                    (float)(other.frame * WARRIOR_FRAME_W),
+                    (float)(other.row * WARRIOR_FRAME_H),
+                    (float)WARRIOR_FRAME_W,
+                    (float)WARRIOR_FRAME_H
+                };
+                SDL_FRect otherDst = scaleRect({ other.x, other.y, player.getWidth(), player.getHeight() });
+                SDL_FlipMode otherFlip = other.facingRight ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+                SDL_RenderTextureRotated(renderer, warriorTexture, &otherSrc, &otherDst, 0.0, nullptr, otherFlip);
+            }
+ 
+            // Back to normal color for our own warrior
+            SDL_SetTextureColorMod(warriorTexture, 255, 255, 255);
         }
 
         /* Draw Warrior Player */
@@ -718,6 +957,12 @@ int main(int argc, char* argv[]) {
 
         // Display everything drawn during this frame onto the screen
         SDL_RenderPresent(renderer);
+    }
+
+    // Stop the networking thread before cleaning up
+    sharedData.running = false;
+    if (networkThread.joinable()) {
+        networkThread.join();
     }
 
     // Clean up and exit

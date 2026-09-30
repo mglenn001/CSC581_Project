@@ -88,6 +88,9 @@ You should see the game screen successfully in the console.
 * **W** — Jump
 * **Shift** — Hold to Run
 * **T** — Toggle Resolution Scaling (Proportional vs. Pixel)
+* **P** — Pause / Unpause
+* **F** — Freeze / Unfreeze
+* **-/+** — Increase / Decrease game speed
 
 ## Resources
 
