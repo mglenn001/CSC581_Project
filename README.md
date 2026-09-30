@@ -74,12 +74,23 @@ make
 
 ### 5. Run the game
 
+No need to run ./server command. Every player runs the game as a peer with its own ID.
+
+#### On **first terminal**:
+
 ```bash
-./main
+./main 1
 
 ```
 
-You should see the game screen successfully in the console.
+#### On **second terminal**:
+
+```bash
+./main 2
+
+```
+
+You should see the game screen successfully open.
 
 ## Game Control
 
@@ -90,7 +101,7 @@ You should see the game screen successfully in the console.
 * **T** — Toggle Resolution Scaling (Proportional vs. Pixel)
 * **P** — Pause / Unpause
 * **F** — Freeze / Unfreeze
-* **-/+** — Increase / Decrease game speed
+* **+/-** — Increase / Decrease game speed
 
 ## Resources
 

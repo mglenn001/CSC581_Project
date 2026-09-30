@@ -296,14 +296,14 @@ int main(int argc, char* argv[]) {
     float rightPlatY = groundY - (tileSize * 5.2f);
     platforms.push_back(Entity(1250.0f, rightPlatY, tileSize * 3.0f, tileSize));
 
-    // Section 4: Server-driven moving platform.
-    // Its X position comes ONLY from the server (sharedData.movingPlatformX),
-    // never from this client's own timeline, so it stays in the same place for
-    // every client no matter how fast or slow that client is running.
+    // Section 5: Shared moving platform (no server).
+    // Its X position comes from getSharedPlatformX(), which only depends on the
+    // shared wall clock. It never uses this client's own timeline, so it stays
+    // in the same place for every peer no matter how fast or slow they run.
     // It shuttles between floating island A and floating island B.
     const float MOVING_PLAT_W = tileSize * 2.0f;
-    Entity movingPlatform(600.0f, islandBY, MOVING_PLAT_W, tileSize);
-    float previousPlatX = 600.0f; // last frame's X, used to carry the player along
+    float previousPlatX = getSharedPlatformX(); // last frame's X, used to carry the player along
+    Entity movingPlatform(previousPlatX, islandBY, MOVING_PLAT_W, tileSize);
 
     // Physics manager instance for applying movement and gravity updates
     Physics physics;
@@ -321,7 +321,7 @@ int main(int argc, char* argv[]) {
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
 
-    /* Time Management Setup */
+    /* Section 1: Time Management Setup */
     // Global timeline: master clock for the whole game world (root, anchored to real time)
     Timeline gameTime;
  
@@ -335,15 +335,16 @@ int main(int argc, char* argv[]) {
     bool plusKeyWasPressed = false;
     bool freezeSlimeKeyWasPressed = false;
 
-    /* Networking Setup */
+    /* Section 2: Networking Setup */
     // Data shared with the networking thread
     SharedData sharedData;
     std::thread networkThread;
  
     if (online) {
-        // The networking thread talks to the server so the game loop never waits on the network
+        // Section 5: The networking thread talks directly to the other peers
+        // so the game loop never waits on the network
         networkThread = std::thread(networkingThread, std::ref(sharedData), clientID);
-        SDL_Log("Client %d started. Connecting to server...", clientID);
+        SDL_Log("Peer %d started. Connecting to other peers...", clientID);
     } else {
         SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
     }
@@ -419,9 +420,6 @@ int main(int argc, char* argv[]) {
         plusKeyWasPressed = plusKeyIsPressed;
  
         // Press 'F' to freeze/unfreeze ONLY the slime's local timeline.
-        // This demonstrates a local timeline being manipulated independently
-        // of the global one: the player keeps moving at normal speed while
-        // the slime is frozen in place.
         bool freezeSlimeKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_F);
         if (freezeSlimeKeyIsPressed && !freezeSlimeKeyWasPressed) {
             if (slimeTime.isPaused()) {
@@ -469,12 +467,8 @@ int main(int argc, char* argv[]) {
         // Apply physics
         physics.update(player, deltaTime);
 
-        // Read the server-authoritative platform position (written by the networking thread)
-        float currentPlatX = previousPlatX;
-        {
-            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
-            currentPlatX = sharedData.movingPlatformX;
-        }
+        // Section 5: Work out the platform position from the shared wall clock
+        float currentPlatX = getSharedPlatformX();
         // How far the platform moved since last frame (used to carry a rider)
         float platDeltaX = currentPlatX - previousPlatX;
         movingPlatform.setPosition(currentPlatX, islandBY);
@@ -809,7 +803,7 @@ int main(int argc, char* argv[]) {
         scaledTileRect = scaleRect(rightPlatRect);
         SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect);
 
-        // Server-driven moving platform (Section 4)
+        // Shared moving platform (Section 5)
         SDL_FRect movingPlatRect = { movingPlatform.getX(), movingPlatform.getY(), tileSize, tileSize };
         scaledTileRect = scaleRect(movingPlatRect);
         SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect); // Left end
