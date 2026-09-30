@@ -32,7 +32,7 @@ struct PlayerInfo {
 
 // Global state shared across client worker threads
 static std::map<int, PlayerInfo> g_players;
-static std::mutex g_playersMutex; // Mutex to ensure thread-safe updates to g_players
+static std::mutex g_playersMutex; // mutex to ensure thread-safe updates to g_players
 
 // Server-authoritative moving platform state
 static float g_platformX = 600.0f;

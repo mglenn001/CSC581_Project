@@ -296,6 +296,15 @@ int main(int argc, char* argv[]) {
     float rightPlatY = groundY - (tileSize * 5.2f);
     platforms.push_back(Entity(1250.0f, rightPlatY, tileSize * 3.0f, tileSize));
 
+    // Section 4: Server-driven moving platform.
+    // Its X position comes ONLY from the server (sharedData.movingPlatformX),
+    // never from this client's own timeline, so it stays in the same place for
+    // every client no matter how fast or slow that client is running.
+    // It shuttles between floating island A and floating island B.
+    const float MOVING_PLAT_W = tileSize * 2.0f;
+    Entity movingPlatform(600.0f, islandBY, MOVING_PLAT_W, tileSize);
+    float previousPlatX = 600.0f; // last frame's X, used to carry the player along
+
     // Physics manager instance for applying movement and gravity updates
     Physics physics;
 
@@ -460,6 +469,17 @@ int main(int argc, char* argv[]) {
         // Apply physics
         physics.update(player, deltaTime);
 
+        // Read the server-authoritative platform position (written by the networking thread)
+        float currentPlatX = previousPlatX;
+        {
+            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+            currentPlatX = sharedData.movingPlatformX;
+        }
+        // How far the platform moved since last frame (used to carry a rider)
+        float platDeltaX = currentPlatX - previousPlatX;
+        movingPlatform.setPosition(currentPlatX, islandBY);
+        previousPlatX = currentPlatX;
+
         // Collision checks
         bool isGrounded = false;
         float playerX = player.getX();
@@ -481,6 +501,18 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 }
+            }
+        }
+
+        // Landing on the moving platform (stand on top and get carried along with it)
+        if (!isGrounded && player.getVelocityY() >= 0.0f &&
+            Collision::checkCollision(player, movingPlatform)) {
+            float previousY = playerY - (player.getVelocityY() * deltaTime);
+            if (previousY + playerH <= movingPlatform.getY() + 16.0f) {
+                player.setPosition(playerX + platDeltaX, movingPlatform.getY() - playerH);
+                player.setVelocityY(0.0f);
+                player.setGrounded(true);
+                isGrounded = true;
             }
         }
 
@@ -593,13 +625,6 @@ int main(int argc, char* argv[]) {
 
         // Keep sharedData updated with current time scale so networking thread syncs its loop rate
         sharedData.currentTimeScale.store(static_cast<float>(gameTime.getScale()));
-
-        // Read server-authoritative moving platform position
-        float currentPlatX = 600.0f;
-        {
-            std::lock_guard<std::mutex> lock(sharedData.playerMutex);
-            currentPlatX = sharedData.movingPlatformX;
-        }
 
         // Give the networking thread our latest player state
         if (online) {
@@ -783,6 +808,14 @@ int main(int argc, char* argv[]) {
         rightPlatRect.x += tileSize;
         scaledTileRect = scaleRect(rightPlatRect);
         SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect);
+
+        // Server-driven moving platform (Section 4)
+        SDL_FRect movingPlatRect = { movingPlatform.getX(), movingPlatform.getY(), tileSize, tileSize };
+        scaledTileRect = scaleRect(movingPlatRect);
+        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect); // Left end
+        movingPlatRect.x += tileSize;
+        scaledTileRect = scaleRect(movingPlatRect);
+        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect); // Right end
 
         /* Draw Decorative Objects */
         const float boxSize = 56.0f;
