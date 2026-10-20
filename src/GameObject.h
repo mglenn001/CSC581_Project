@@ -7,22 +7,14 @@
 #include <unordered_map>
 #include "Component.h"
 
-// GameObject is the one and only "kind" of object in the engine - a
-// handle plus a bag of components. There is no inheritance tree: a
-// player, the totem, a platform, an enemy, and a remote player are all
-// just GameObjects with a different mix of components attached.
-//
-// New object types in the future (a projectile, a hazard, a pickup)
-// are new combinations of existing components, or at most one new
-// component - never a new class in an inheritance chain, and nothing
-// here has to change to support them.
+// GameObject represents any object in the engine using a collection of components 
+// instead of a complex inheritance tree.
 class GameObject {
 public:
     explicit GameObject(std::string type, int id = -1)
         : type(std::move(type)), id(id) {}
 
-    // Attaches a component, constructing it in place. Replaces any
-    // existing component of the same type.
+    // Adds or replaces a component on this object.
     template <typename T, typename... Args>
     T& addComponent(Args&&... args) {
         auto component = std::make_unique<T>(std::forward<Args>(args)...);
@@ -31,9 +23,7 @@ public:
         return *raw;
     }
 
-    // Returns the component of type T, or nullptr if this GameObject
-    // doesn't have one. Systems use this to opt in/out of behavior
-    // (e.g. Physics only touches objects that have a GravityComponent).
+    // Returns the component of type T, or nullptr if it doesn't have one.
     template <typename T>
     T* getComponent() {
         auto it = components.find(std::type_index(typeid(T)));
@@ -66,10 +56,8 @@ public:
     int getId() const { return id; }
 
 private:
-    std::string type; // e.g. "player", "platform", "totem" - for
-                      // debugging/logging, not for branching logic
-    int id; // matches the networking clientID/PLATFORM_ID
-            // scheme already used in server.cpp/main.cpp
+    std::string type; // object type name for debugging
+    int id; // network or object ID
 
     std::unordered_map<std::type_index, std::unique_ptr<Component>> components;
 };

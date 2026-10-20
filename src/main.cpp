@@ -37,8 +37,8 @@ const int WINDOW_HEIGHT = 1080;
 // Milestone 3: the level is wider than the window, so the screen scrolls.
 const float WORLD_WIDTH = 3840.0f;
 // The screen scrolls when the player enters the left/right part of the window
-const float SCROLL_LEFT_FRACTION = 0.35f;   // left 35% of the window
-const float SCROLL_RIGHT_FRACTION = 0.65f;  // right 35% of the window (starts at 65%)
+const float SCROLL_LEFT_FRACTION = 0.35f; // left 35% of the window
+const float SCROLL_RIGHT_FRACTION = 0.65f; // right 35% of the window (starts at 65%)
 
 // Portal sprite sheet settings
 const int PORTAL_FRAME_COUNT = 4;
@@ -136,7 +136,6 @@ int main(int argc, char* argv[]) {
     SDL_Renderer *renderer = nullptr;
 
     // Create the game window and renderer
-    // Show the client ID in the window title so it is easy to tell windows apart
     std::string windowTitle = online ? "Game Engine - Client " + std::to_string(clientID) : "Game Engine";
  
     if (!SDL_CreateWindowAndRenderer(
@@ -296,7 +295,7 @@ int main(int argc, char* argv[]) {
     deathZones.push_back(makeDeathZone(GAP3_START, zoneY, GAP3_END - GAP3_START, zoneH, 2));
 
     // Hidden side-scrolling boundaries. They sit at the left and right part of the
-    // window and are moved with the camera every frame (see the game loop).
+    // window and are moved with the camera every frame.
     GameObject leftScrollZone = makeScrollTrigger(0.0f, 0.0f, 10.0f, (float)actualHeight, -1);
     GameObject rightScrollZone = makeScrollTrigger(0.0f, 0.0f, 10.0f, (float)actualHeight, 1);
 
@@ -304,8 +303,7 @@ int main(int argc, char* argv[]) {
     float cameraX = 0.0f;
     const float maxCameraX = std::max(0.0f, WORLD_WIDTH - (float)actualWidth);
 
-    // Static platforms. Each one has its own position, size and tile style/tint.
-    // Style "thick" = tiles 07/08/09, style "thin" = tiles 32/33/34.
+    // Static platforms: Each one has its own position, size and tile style/tint.
     std::vector<GameObject> platforms;
 
     // Floating island A
@@ -343,7 +341,7 @@ int main(int argc, char* argv[]) {
     platforms.push_back(makeStaticPlatform(1250.0f, rightPlatY, tileSize * 3.0f, tileSize,
                         tile32Texture, tile33Texture, tile34Texture));
 
-    // New platforms in the scrolling part of the level (blue, orange, green tints)
+    /* New platforms in the scrolling part of the level (blue, orange, green tints) */
     // Platform the elevator carries you to
     float elevatorTopY = groundY - (tileSize * 6.0f);
     float elevatorBottomY = groundY - (tileSize * 2.0f);
@@ -362,14 +360,14 @@ int main(int argc, char* argv[]) {
     platforms.push_back(makeStaticPlatform(3300.0f, endPlatY, tileSize * 3.0f, tileSize,
                         tile32Texture, tile33Texture, tile34Texture, 220, 170, 255));
 
-    // Moving platforms. Their position comes from the shared wall clock, so it never
+    // Moving platforms: Their position comes from the shared wall clock, so it never
     // uses this client's own timeline and every peer sees them in the same place.
     std::vector<GameObject> movingPlatforms;
-    // Pattern 1: horizontal. Shuttles left and right between floating island A and B.
+    // Pattern 1 (horizontal): Shuttles left and right between floating island A and B.
     movingPlatforms.push_back(makeMovingPlatform(700.0f, islandBY, tileSize * 2.0f, tileSize,
                               MoveAxis::Horizontal, 600.0f, 800.0f, 1.5f,
                               tile32Texture, tile34Texture));
-    // Pattern 2: vertical. An elevator going up and down.
+    // Pattern 2 (vertical): An elevator going up and down.
     movingPlatforms.push_back(makeMovingPlatform(1850.0f, elevatorBottomY, tileSize * 2.0f, tileSize,
                               MoveAxis::Vertical, elevatorTopY, elevatorBottomY, 0.8f,
                               tile32Texture, tile34Texture));
@@ -599,8 +597,6 @@ int main(int argc, char* argv[]) {
         }
 
         // Landing on moving platforms (stand on top and get carried along).
-        // The feet only need to be NEAR the top, so a platform that moves away
-        // (the elevator going down) does not drop the rider.
         for (size_t i = 0; i < movingPlatforms.size() && !isGrounded && velY >= 0.0f; ++i) {
             const GameObject& plat = movingPlatforms[i];
             float feetY = playerY + playerH;
@@ -667,7 +663,7 @@ int main(int argc, char* argv[]) {
         // Determine warrior animation state based on movement
         CharacterState currentState = CharacterState::Idle;
         int row = 0; // first row of the warrior sprite sheet is idle animation
-        int maxFrames = 5;  // number of frames in the current animation row
+        int maxFrames = 5; // number of frames in the current animation row
         float animFPS = 8.0f; // speed of the current animation in frames per second (FPS)
 
         float vy = go::getVelocityY(player);

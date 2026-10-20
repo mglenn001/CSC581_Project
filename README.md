@@ -74,7 +74,11 @@ make
 
 ### 5. Run the game
 
-No need to run ./server command. Every player runs the game as a peer with its own ID.
+No need to run `./server` command. Every player runs the game as a peer with its own ID.
+
+You can run up to **4** clients (`./main 1` to `./main 4`).
+
+Optional: add a data format after the ID. `text` is the default.
 
 #### On **first terminal**:
 
@@ -86,7 +90,7 @@ No need to run ./server command. Every player runs the game as a peer with its o
 #### On **second terminal**:
 
 ```bash
-./main 2
+./main 2 binary
 
 ```
 

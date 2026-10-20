@@ -4,7 +4,7 @@
 #include "GameObject.h"
 #include "Components.h"
 
-// Local player: moves, has gravity, drawn, collides, owned by this client.
+// Creates a local player object with movement, physics, and rendering components.
 inline GameObject makePlayer(int clientId, float x, float y, float w, float h)
 {
     GameObject obj("player", clientId);
@@ -19,8 +19,7 @@ inline GameObject makePlayer(int clientId, float x, float y, float w, float h)
     return obj;
 }
 
-// Moving platform: no gravity or velocity. Every peer computes its position
-// from the same wall-clock sine wave, so nothing needs to be sent.
+// Creates a deterministic moving platform object.
 inline GameObject makePlatform(float x, float y, float w, float h)
 {
     GameObject obj("platform", 0);

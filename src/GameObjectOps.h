@@ -7,11 +7,8 @@
 #include "Components.h"
 #include "Scaling.h"
 
-// Small helpers that do to a GameObject what Entity's methods used to do.
-// Each one reads/writes the relevant component and quietly does nothing
-// if the object doesn't have it, so they are safe on any GameObject.
+// Helper functions for reading and updating GameObject components safely.
 namespace go {
-
 inline float getX(const GameObject& o) { auto* t = o.getComponent<TransformComponent>(); return t ? t->x : 0.0f; }
 inline float getY(const GameObject& o) { auto* t = o.getComponent<TransformComponent>(); return t ? t->y : 0.0f; }
 inline float getWidth(const GameObject& o) { auto* t = o.getComponent<TransformComponent>(); return t ? t->width : 0.0f; }
@@ -58,7 +55,7 @@ inline void setSpriteSheet(GameObject& o, int frameCount, int frameWidth, int fr
     }
 }
 
-// Same fixed-tick animation Entity::updateAnimation() does.
+// Updates sprite animation frames.
 inline void updateAnimation(GameObject& o)
 {
     auto* r = o.getComponent<RenderableComponent>();
@@ -72,7 +69,7 @@ inline void updateAnimation(GameObject& o)
     }
 }
 
-// Same drawing and scaling logic as Entity::render().
+// Draws the object to the screen with proper scaling.
 inline void render(GameObject& o, SDL_Renderer* renderer)
 {
     auto* t = o.getComponent<TransformComponent>();

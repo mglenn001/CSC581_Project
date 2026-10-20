@@ -5,10 +5,9 @@
 #include "Components.h"
 #include "GameComponents.h"
 
-// Factory helpers for the objects my game needs.
-// Each one just attaches a mix of components.
+// Factory helpers to create specific game objects by attaching components.
 
-// Static platform: has a position/size and a tile style, never moves.
+// Creates a static (non-moving) platform.
 inline GameObject makeStaticPlatform(float x, float y, float w, float h,
                                      SDL_Texture* left, SDL_Texture* middle, SDL_Texture* right,
                                      Uint8 r = 255, Uint8 g = 255, Uint8 b = 255)
@@ -26,9 +25,7 @@ inline GameObject makeStaticPlatform(float x, float y, float w, float h,
     return obj;
 }
 
-// Moving platform: like a static one, plus a movement pattern.
-// Nothing is sent over the network (Deterministic) because every
-// client computes the same position from the shared clock.
+// Creates a platform that moves back and forth deterministically.
 inline GameObject makeMovingPlatform(float x, float y, float w, float h,
                                      MoveAxis axis, float minValue, float maxValue, float speed,
                                      SDL_Texture* left, SDL_Texture* right)
@@ -45,7 +42,7 @@ inline GameObject makeMovingPlatform(float x, float y, float w, float h,
     return obj;
 }
 
-// Hidden spawn point: just a position and an id.
+// Creates a hidden spawn point location.
 inline GameObject makeSpawnPoint(int spawnId, float x, float y)
 {
     GameObject obj("spawn_point");
@@ -54,7 +51,7 @@ inline GameObject makeSpawnPoint(int spawnId, float x, float y)
     return obj;
 }
 
-// Hidden death zone: a rectangle that sends the player to a spawn point.
+// Creates a death zone that resets the player on contact.
 inline GameObject makeDeathZone(float x, float y, float w, float h, int spawnId)
 {
     GameObject obj("death_zone");
@@ -64,7 +61,7 @@ inline GameObject makeDeathZone(float x, float y, float w, float h, int spawnId)
     return obj;
 }
 
-// Hidden scroll boundary: scrolls the screen when the player touches it.
+// Creates a trigger zone that scrolls the screen when touched.
 inline GameObject makeScrollTrigger(float x, float y, float w, float h, int direction)
 {
     GameObject obj("scroll_trigger");
@@ -74,7 +71,7 @@ inline GameObject makeScrollTrigger(float x, float y, float w, float h, int dire
     return obj;
 }
 
-// Slime enemy: moves on its own and respawns the player on touch.
+// Creates an enemy that respawns the player on touch.
 inline GameObject makeEnemy(float x, float y, float w, float h)
 {
     GameObject obj("enemy");

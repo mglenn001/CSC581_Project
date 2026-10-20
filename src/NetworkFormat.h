@@ -1,10 +1,6 @@
 #pragma once
 
-// Milestone 3: two ways to send a player's state (TEXT or BINARY).
-// Based on the team's NetworkFormat.h. Here the message also carries
-// the warrior's facing direction and animation (row + frame) so other
-// clients can draw the right sprite.
-//
+// Milestone 3: handles sending player states via TEXT or BINARY format.
 // Pick a format when starting a client:
 //   ./main 1            -> TEXT (default)
 //   ./main 1 text
@@ -20,7 +16,7 @@ enum class NetworkFormat {
     BINARY
 };
 
-// Everything we send about one player
+// Data sent across the network for a player
 struct PlayerState {
     float x = 0.0f;
     float y = 0.0f;
@@ -30,10 +26,10 @@ struct PlayerState {
 };
 
 namespace NetFormat {
-// First byte of every binary packet, used to tell it apart from text
+// First byte of every binary packet to identify it
 constexpr uint8_t BINARY_MAGIC = 0xB1;
 
-// Binary layout, exactly 13 bytes (no padding)
+// Binary packet layout (13 bytes, no padding)
 #pragma pack(push, 1)
 struct BinaryPlayerPacket {
     uint8_t magic;
@@ -49,17 +45,17 @@ struct BinaryPlayerPacket {
 
 static_assert(sizeof(BinaryPlayerPacket) == 13, "BinaryPlayerPacket must be 13 bytes");
 
-// Turn a name from the command line into a format (unknown = TEXT)
+// Parses the network format name from the command line
 inline NetworkFormat parseFormat(const std::string& name) {
     return (name == "binary") ? NetworkFormat::BINARY : NetworkFormat::TEXT;
 }
 
-// Format name for log messages
+// Returns the format name for logging
 inline const char* formatName(NetworkFormat format) {
     return (format == NetworkFormat::BINARY) ? "BINARY" : "TEXT";
 }
 
-// Build the bytes we send over the network
+// Encodes player state into network bytes
 inline std::string encode(NetworkFormat format, int clientID, const PlayerState& s) {
     if (format == NetworkFormat::BINARY) {
         BinaryPlayerPacket p;
@@ -73,19 +69,18 @@ inline std::string encode(NetworkFormat format, int clientID, const PlayerState&
         return std::string(reinterpret_cast<const char*>(&p), sizeof(p));
     }
 
-    // TEXT: "id x y facingRight row frame"
+    // TEXT format: "id x y facingRight row frame"
     std::ostringstream out;
     out << clientID << " " << s.x << " " << s.y << " "
         << (s.facingRight ? 1 : 0) << " " << s.row << " " << s.frame;
     return out.str();
 }
 
-// Read received bytes back into an id and a player state.
-// Works for both formats, so clients with different formats can still talk.
+// Decodes received bytes into a player ID and state.
 inline bool decode(const void* data, size_t size, int& clientID, PlayerState& s) {
     const uint8_t* bytes = static_cast<const uint8_t*>(data);
 
-    // BINARY: right size and starts with the magic byte
+    // Decode binary format
     if (size == sizeof(BinaryPlayerPacket) && bytes[0] == BINARY_MAGIC) {
         BinaryPlayerPacket p;
         std::memcpy(&p, bytes, sizeof(p));
@@ -98,7 +93,7 @@ inline bool decode(const void* data, size_t size, int& clientID, PlayerState& s)
         return true;
     }
 
-    // TEXT: parse "id x y facingRight row frame"
+    // Decode text format
     std::istringstream in(std::string(static_cast<const char*>(data), size));
     int facing = 1;
     if (!(in >> clientID >> s.x >> s.y >> facing >> s.row >> s.frame)) {
