@@ -10,9 +10,9 @@
 #include <thread>
 
 // Section 5: Peer-to-peer settings.
-// Client 1 publishes on port 6001, Client 2 on 6002, Client 3 on 6003.
+// Client 1 publishes on port 6001, Client 2 on 6002, and so on up to 6004.
 #define PEER_BASE_PORT 6000
-#define MAX_PEERS 3
+#define MAX_PEERS 4
 // Forget a peer if we haven't heard from it for this long (milliseconds)
 #define PEER_TIMEOUT_MS 2000
 
@@ -23,20 +23,34 @@ static int64_t nowMs()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-float getSharedPlatformX()
+float getSharedWave(float minValue, float maxValue, double speed)
 {
     // Seconds since 1970 from the wall clock. Every peer reads the same clock,
-    // so every peer gets the same platform position without asking anyone.
+    // so every peer gets the same position without asking anyone.
     double seconds = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     // Keep only the position inside one sine wave cycle.
     // This keeps the number small so we don't lose precision.
     const double TWO_PI = 6.283185307179586;
-    double phase = std::fmod(seconds * 1.5, TWO_PI);
+    double phase = std::fmod(seconds * speed, TWO_PI);
 
+    // Swing between minValue and maxValue
+    float middle = (minValue + maxValue) / 2.0f;
+    float range = (maxValue - minValue) / 2.0f;
+    return middle + static_cast<float>(std::sin(phase)) * range;
+}
+
+float getSharedPlatformX()
+{
     // Oscillate platform between X = 600 and X = 800
-    return 700.0f + static_cast<float>(std::sin(phase)) * 100.0f;
+    return getSharedWave(600.0f, 800.0f, 1.5);
+}
+
+float getSharedPlatformY(float topY, float bottomY)
+{
+    // Slower wave so the player has time to ride it up and down
+    return getSharedWave(topY, bottomY, 0.8);
 }
 
 void networkingThread(SharedData& sharedData, int clientID)
@@ -68,24 +82,20 @@ void networkingThread(SharedData& sharedData, int clientID)
 
         while (sharedData.running.load()) {
             // Copy our player's latest state
-            float x, y;
-            bool facingRight;
-            int row, frame;
+            PlayerState mine;
             {
                 std::lock_guard<std::mutex> lock(sharedData.playerMutex);
-                x = sharedData.playerX;
-                y = sharedData.playerY;
-                facingRight = sharedData.playerFacingRight;
-                row = sharedData.playerRow;
-                frame = sharedData.playerFrame;
+                mine.x = sharedData.playerX;
+                mine.y = sharedData.playerY;
+                mine.facingRight = sharedData.playerFacingRight;
+                mine.row = sharedData.playerRow;
+                mine.frame = sharedData.playerFrame;
             }
 
-            // Send our state straight to the other peers
-            // Message format: id x y facingRight row frame
-            std::ostringstream message;
-            message << clientID << " " << x << " " << y << " "
-                    << (facingRight ? 1 : 0) << " " << row << " " << frame;
-            publisher.send(zmq::buffer(message.str()), zmq::send_flags::none);
+            // Send our state straight to the other peers.
+            // encode() builds TEXT or BINARY depending on the chosen format.
+            std::string message = NetFormat::encode(sharedData.networkFormat, clientID, mine);
+            publisher.send(zmq::buffer(message), zmq::send_flags::none);
 
             // Read every message that has arrived. dontwait means we never get
             // stuck waiting on a slow or missing peer.
@@ -96,15 +106,14 @@ void networkingThread(SharedData& sharedData, int clientID)
                     break; // nothing more waiting
                 }
 
-                std::string text(static_cast<char*>(incoming.data()), incoming.size());
-                std::istringstream fields(text);
-                int id, facing, remoteRow, remoteFrame;
-                float remoteX, remoteY;
-                if (fields >> id >> remoteX >> remoteY >> facing >> remoteRow >> remoteFrame) {
-                    if (id != clientID) {
+                // decode() detects TEXT or BINARY from the message itself
+                int id = 0;
+                PlayerState other;
+                if (NetFormat::decode(incoming.data(), incoming.size(), id, other)) {
+                    if (id != clientID && id >= 1 && id <= MAX_PEERS) {
                         std::lock_guard<std::mutex> lock(sharedData.playerMutex);
-                        sharedData.remotePlayers[id] = { remoteX, remoteY, facing != 0,
-                                                         remoteRow, remoteFrame, nowMs() };
+                        sharedData.remotePlayers[id] = { other.x, other.y, other.facingRight,
+                                                         other.row, other.frame, nowMs() };
                     }
                 }
             }

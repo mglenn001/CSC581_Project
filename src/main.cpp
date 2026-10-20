@@ -23,11 +23,22 @@
 #include "Timeline.h"
 #include "SharedData.h"
 #include "Networking.h"
+#include "GameObjectFactory.h"
+#include "GameObjectOps.h"
+#include "GameObjects.h"
+#include <algorithm>
+#include <cmath>
 
 /* Global Settings and Constants */
 // Default width and height of the game window (in pixels)
 const int WINDOW_WIDTH = 1920;
 const int WINDOW_HEIGHT = 1080;
+
+// Milestone 3: the level is wider than the window, so the screen scrolls.
+const float WORLD_WIDTH = 3840.0f;
+// The screen scrolls when the player enters the left/right part of the window
+const float SCROLL_LEFT_FRACTION = 0.35f;   // left 35% of the window
+const float SCROLL_RIGHT_FRACTION = 0.65f;  // right 35% of the window (starts at 65%)
 
 // Portal sprite sheet settings
 const int PORTAL_FRAME_COUNT = 4;
@@ -96,13 +107,23 @@ void prepareFrameData(
 }
 
 int main(int argc, char* argv[]) {
-    // Each client needs its own ID: ./main 1  and  ./main 2
-    // With no ID the game runs offline, like before.
+    // Each client needs its own ID (1 to 4): ./main 1  and  ./main 2
+    // Optional second argument picks the network data format: ./main 1 binary
+    // With no ID the game runs offline.
     int clientID = 0;
     if (argc >= 2) {
         clientID = std::atoi(argv[1]);
     }
+    if (clientID < 0 || clientID > 4) {
+        SDL_Log("Client ID must be between 1 and 4");
+        return 1;
+    }
     bool online = (clientID > 0);
+
+    NetworkFormat networkFormat = NetworkFormat::TEXT; // default format
+    if (argc >= 3) {
+        networkFormat = NetFormat::parseFormat(argv[2]);
+    }
 
     // Start up SDL's video system
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -158,14 +179,16 @@ int main(int argc, char* argv[]) {
     // Gap 2: Coordinates where the right cliff gap starts and ends
     const float GAP2_START = 950.0f;
     const float GAP2_END = 1095.0f + tileSize;
+
+    // Gap 3: a new water pit in the far right part of the level
+    const float GAP3_START = 2368.0f;
+    const float GAP3_END = GAP3_START + 3.0f * tileSize;
  
-    // Where the player spawns when starting or dying
+    // Spawn point 1 (start of the level) and spawn point 2 (middle of the level)
     const float START_X = 80.0f;
     const float START_Y = groundY - 128.0f;
-
-    // Where the portal sits (right at the spawn point)
-    const float PORTAL_X = START_X - 24.0f;
-    const float PORTAL_Y = groundY - 128.0f;
+    const float SPAWN2_X = 1700.0f;
+    const float SPAWN2_Y = groundY - 128.0f;
 
     /* Loading Image Assets (Textures) */
     // Load background image
@@ -255,60 +278,107 @@ int main(int argc, char* argv[]) {
     SDL_SetTextureScaleMode(portalTexture, SDL_SCALEMODE_NEAREST);
 
     /* Setup Player and Game Objects */
-    // Create the player object with starting position (X, Y) and hit box size (Width, Height)
-    Entity player(START_X, START_Y, 80.0f, 64.0f);
-    player.setGravityEnabled(true); // gravity will pull the player down
+    // The player is a GameObject built from components (position, velocity,
+    // gravity, collision, network). Position is in WORLD coordinates.
+    GameObject player = makePlayer(clientID, START_X, START_Y, 80.0f, 64.0f);
 
-    // Setup the portal object
-    Entity portal(PORTAL_X, PORTAL_Y, (float)PORTAL_FRAME_W, (float)PORTAL_FRAME_H);
-    portal.setTexture(portalTexture);
-    portal.setSpriteSheet(PORTAL_FRAME_COUNT, PORTAL_FRAME_W, PORTAL_FRAME_H);
-    portal.setAnimationSpeed(PORTAL_FPS);
+    // Hidden spawn points (no RenderableComponent, so they are never drawn)
+    std::vector<GameObject> spawnPoints;
+    spawnPoints.push_back(makeSpawnPoint(1, START_X, START_Y));
+    spawnPoints.push_back(makeSpawnPoint(2, SPAWN2_X, SPAWN2_Y));
 
-    // List of floating platform bounding boxes so the player can land on them
-    std::vector<Entity> platforms;
+    // Hidden death zones under each gap. Touching one sends the player to a spawn point.
+    const float zoneY = groundY + tileSize * 0.5f;
+    const float zoneH = tileSize * 6.0f;
+    std::vector<GameObject> deathZones;
+    deathZones.push_back(makeDeathZone(GAP_START, zoneY, GAP_END - GAP_START, zoneH, 1));
+    deathZones.push_back(makeDeathZone(GAP2_START, zoneY, GAP2_END - GAP2_START, zoneH, 1));
+    deathZones.push_back(makeDeathZone(GAP3_START, zoneY, GAP3_END - GAP3_START, zoneH, 2));
+
+    // Hidden side-scrolling boundaries. They sit at the left and right part of the
+    // window and are moved with the camera every frame (see the game loop).
+    GameObject leftScrollZone = makeScrollTrigger(0.0f, 0.0f, 10.0f, (float)actualHeight, -1);
+    GameObject rightScrollZone = makeScrollTrigger(0.0f, 0.0f, 10.0f, (float)actualHeight, 1);
+
+    // Camera: how far the screen is scrolled to the right (0 = start of level)
+    float cameraX = 0.0f;
+    const float maxCameraX = std::max(0.0f, WORLD_WIDTH - (float)actualWidth);
+
+    // Static platforms. Each one has its own position, size and tile style/tint.
+    // Style "thick" = tiles 07/08/09, style "thin" = tiles 32/33/34.
+    std::vector<GameObject> platforms;
 
     // Floating island A
     float islandAY = groundY - (tileSize * 2.0f);
-    platforms.push_back(Entity(450.0f, islandAY, tileSize * 4.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(450.0f, islandAY, tileSize * 4.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture));
 
     // Floating island B
     float islandBY = groundY - (tileSize * 3.5f);
-    platforms.push_back(Entity(950.0f, islandBY, tileSize * 3.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(950.0f, islandBY, tileSize * 3.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture));
 
     // Higher platform
     float platY = groundY - (tileSize * 6.0f);
-    platforms.push_back(Entity(420.0f, platY, tileSize * 3.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(420.0f, platY, tileSize * 3.0f, tileSize,
+                        tile32Texture, tile33Texture, tile34Texture));
 
     // High thin platform path
     float highPlatY = groundY - (tileSize * 4.0f);
-    platforms.push_back(Entity(180.0f, highPlatY, tileSize * 4.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(180.0f, highPlatY, tileSize * 4.0f, tileSize,
+                        tile32Texture, tile33Texture, tile34Texture));
 
     // High thin platform
     float high2PlatY = groundY - (tileSize * 7.0f);
-    platforms.push_back(Entity(80.0f, high2PlatY, tileSize * 3.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(80.0f, high2PlatY, tileSize * 3.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture));
 
     // High thin platform
     float high3PlatY = groundY - (tileSize * 7.0f);
-    platforms.push_back(Entity(700.0f, high3PlatY, tileSize * 3.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(700.0f, high3PlatY, tileSize * 3.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture));
 
     // High thick platform
     float rightPlatY = groundY - (tileSize * 5.2f);
-    platforms.push_back(Entity(1250.0f, rightPlatY, tileSize * 3.0f, tileSize));
+    platforms.push_back(makeStaticPlatform(1250.0f, rightPlatY, tileSize * 3.0f, tileSize,
+                        tile32Texture, tile33Texture, tile34Texture));
 
-    // Section 5: Shared moving platform (no server).
-    // Its X position comes from getSharedPlatformX(), which only depends on the
-    // shared wall clock. It never uses this client's own timeline, so it stays
-    // in the same place for every peer no matter how fast or slow they run.
-    // It shuttles between floating island A and floating island B.
-    const float MOVING_PLAT_W = tileSize * 2.0f;
-    float previousPlatX = getSharedPlatformX(); // last frame's X, used to carry the player along
-    Entity movingPlatform(previousPlatX, islandBY, MOVING_PLAT_W, tileSize);
+    // New platforms in the scrolling part of the level (blue, orange, green tints)
+    // Platform the elevator carries you to
+    float elevatorTopY = groundY - (tileSize * 6.0f);
+    float elevatorBottomY = groundY - (tileSize * 2.0f);
+    platforms.push_back(makeStaticPlatform(2000.0f, elevatorTopY, tileSize * 3.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture, 170, 200, 255));
+    // Platform over the new water pit
+    float pitPlatY = groundY - (tileSize * 4.0f);
+    platforms.push_back(makeStaticPlatform(2300.0f, pitPlatY, tileSize * 4.0f, tileSize,
+                        tile32Texture, tile33Texture, tile34Texture, 255, 210, 150));
+    // Platform after the pit
+    float afterPitY = groundY - (tileSize * 3.0f);
+    platforms.push_back(makeStaticPlatform(2650.0f, afterPitY, tileSize * 3.0f, tileSize,
+                        tile07Texture, tile08Texture, tile09Texture, 180, 255, 180));
+    // Platform near the end of the level
+    float endPlatY = groundY - (tileSize * 4.0f);
+    platforms.push_back(makeStaticPlatform(3300.0f, endPlatY, tileSize * 3.0f, tileSize,
+                        tile32Texture, tile33Texture, tile34Texture, 220, 170, 255));
+
+    // Moving platforms. Their position comes from the shared wall clock, so it never
+    // uses this client's own timeline and every peer sees them in the same place.
+    std::vector<GameObject> movingPlatforms;
+    // Pattern 1: horizontal. Shuttles left and right between floating island A and B.
+    movingPlatforms.push_back(makeMovingPlatform(700.0f, islandBY, tileSize * 2.0f, tileSize,
+                              MoveAxis::Horizontal, 600.0f, 800.0f, 1.5f,
+                              tile32Texture, tile34Texture));
+    // Pattern 2: vertical. An elevator going up and down.
+    movingPlatforms.push_back(makeMovingPlatform(1850.0f, elevatorBottomY, tileSize * 2.0f, tileSize,
+                              MoveAxis::Vertical, elevatorTopY, elevatorBottomY, 0.8f,
+                              tile32Texture, tile34Texture));
 
     // Physics manager instance for applying movement and gravity updates
     Physics physics;
 
-    // Slime enemy initial state
+    // Slime enemy (a GameObject) and its walking state
+    GameObject slime = makeEnemy(600.0f, groundY - 48.0f, (float)SLIME_FRAME_W * 1.5f, (float)SLIME_FRAME_H * 1.5f);
     float slimeX = 600.0f; // starting X position
     float slimeY = groundY - 48.0f; // starting Y position (standing on floor)
     float slimeDir = 1.0f; // direction: 1 = walking right, -1 = walking left
@@ -320,6 +390,22 @@ int main(int argc, char* argv[]) {
     float warriorAnimTimer = 0.0f; // timer to control animation speed
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
+
+    // Portal animation timer (the portals are drawn on top of the hidden spawn points)
+    float portalTimer = 0.0f;
+
+    // Sends the player to a spawn point and moves the camera so the spawn is on screen
+    auto respawnPlayer = [&](int spawnId) {
+        for (const auto& sp : spawnPoints) {
+            if (sp.getComponent<SpawnPointComponent>()->spawnId == spawnId) {
+                go::setPosition(player, go::getX(sp), go::getY(sp));
+                go::setVelocity(player, 0.0f, 0.0f);
+                go::setGrounded(player, false);
+                cameraX = std::clamp(go::getX(sp) - (float)actualWidth * 0.5f, 0.0f, maxCameraX);
+                return;
+            }
+        }
+    };
 
     /* Section 1: Time Management Setup */
     // Global timeline: master clock for the whole game world (root, anchored to real time)
@@ -338,13 +424,14 @@ int main(int argc, char* argv[]) {
     /* Section 2: Networking Setup */
     // Data shared with the networking thread
     SharedData sharedData;
+    sharedData.networkFormat = networkFormat; // Milestone 3: TEXT or BINARY
     std::thread networkThread;
  
     if (online) {
         // Section 5: The networking thread talks directly to the other peers
         // so the game loop never waits on the network
         networkThread = std::thread(networkingThread, std::ref(sharedData), clientID);
-        SDL_Log("Peer %d started. Connecting to other peers...", clientID);
+        SDL_Log("Peer %d started (network format: %s). Connecting to other peers...", clientID, NetFormat::formatName(networkFormat));
     } else {
         SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
     }
@@ -449,13 +536,13 @@ int main(int argc, char* argv[]) {
         bool isMoving = false;
         // Press 'A' to move left
         if (Input::isKeyPressed(SDL_SCANCODE_A)) {
-            player.move(-moveSpeed * deltaTime, 0.0f);
+            go::move(player, -moveSpeed * deltaTime, 0.0f);
             isMoving = true;
             facingRight = false; // flip sprite to face left
         }
         // Press 'D' to move right
         if (Input::isKeyPressed(SDL_SCANCODE_D)) {
-            player.move(moveSpeed * deltaTime, 0.0f);
+            go::move(player, moveSpeed * deltaTime, 0.0f);
             isMoving = true;
             facingRight = true; // flip sprite to face right
         }
@@ -464,33 +551,46 @@ int main(int argc, char* argv[]) {
             physics.jump(player, 650.0f);
         }
 
-        // Apply physics
+        // Apply physics (gravity + velocity)
         physics.update(player, deltaTime);
 
-        // Section 5: Work out the platform position from the shared wall clock
-        float currentPlatX = getSharedPlatformX();
-        // How far the platform moved since last frame (used to carry a rider)
-        float platDeltaX = currentPlatX - previousPlatX;
-        movingPlatform.setPosition(currentPlatX, islandBY);
-        previousPlatX = currentPlatX;
+        // Keep the player inside the level (left and right ends of the world)
+        go::setPosition(player,
+                        std::clamp(go::getX(player), 0.0f, WORLD_WIDTH - go::getWidth(player)),
+                        go::getY(player));
+
+        // Move the moving platforms. Remember how far each one moved this frame
+        // so a rider can be carried along with it.
+        std::vector<float> platformDeltaX(movingPlatforms.size(), 0.0f);
+        for (size_t i = 0; i < movingPlatforms.size(); ++i) {
+            auto* t = movingPlatforms[i].getComponent<TransformComponent>();
+            auto* pattern = movingPlatforms[i].getComponent<MovingPatternComponent>();
+            float newValue = getSharedWave(pattern->minValue, pattern->maxValue, pattern->speed);
+            if (pattern->axis == MoveAxis::Horizontal) {
+                platformDeltaX[i] = newValue - t->x;
+                t->x = newValue;
+            } else {
+                t->y = newValue;
+            }
+        }
 
         // Collision checks
         bool isGrounded = false;
-        float playerX = player.getX();
-        float playerY = player.getY();
-        float playerW = player.getWidth();
-        float playerH = player.getHeight();
+        float playerX = go::getX(player);
+        float playerY = go::getY(player);
+        float playerW = go::getWidth(player);
+        float playerH = go::getHeight(player);
+        float velY = go::getVelocityY(player);
 
-        // Landing on floating platforms (only check when moving downward)
-        if (player.getVelocityY() >= 0.0f) { // Only collide when falling/standing
+        // Landing on static platforms (only check when moving downward)
+        if (velY >= 0.0f) { // Only collide when falling/standing
             for (const auto& plat : platforms) {
                 if (Collision::checkCollision(player, plat)) {
                     // Check if player's feet were above the platform surface in the previous frame
-                    float previousY = playerY - (player.getVelocityY() * deltaTime);
-                    if (previousY + playerH <= plat.getY() + 16.0f) {
-                        player.setPosition(playerX, plat.getY() - playerH); // stand on top
-                        player.setVelocityY(0.0f); // stop falling
-                        player.setGrounded(true); // allow jumping again
+                    float previousY = playerY - (velY * deltaTime);
+                    if (previousY + playerH <= go::getY(plat) + 16.0f) {
+                        go::setPosition(player, playerX, go::getY(plat) - playerH); // stand on top
+                        go::setVelocityY(player, 0.0f); // stop falling
                         isGrounded = true;
                         break;
                     }
@@ -498,50 +598,71 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Landing on the moving platform (stand on top and get carried along with it)
-        if (!isGrounded && player.getVelocityY() >= 0.0f &&
-            Collision::checkCollision(player, movingPlatform)) {
-            float previousY = playerY - (player.getVelocityY() * deltaTime);
-            if (previousY + playerH <= movingPlatform.getY() + 16.0f) {
-                player.setPosition(playerX + platDeltaX, movingPlatform.getY() - playerH);
-                player.setVelocityY(0.0f);
-                player.setGrounded(true);
+        // Landing on moving platforms (stand on top and get carried along).
+        // The feet only need to be NEAR the top, so a platform that moves away
+        // (the elevator going down) does not drop the rider.
+        for (size_t i = 0; i < movingPlatforms.size() && !isGrounded && velY >= 0.0f; ++i) {
+            const GameObject& plat = movingPlatforms[i];
+            float feetY = playerY + playerH;
+            bool overPlatform = (playerX + playerW > go::getX(plat)) &&
+                                (playerX < go::getX(plat) + go::getWidth(plat));
+            bool nearTop = (feetY >= go::getY(plat) - 12.0f) && (feetY <= go::getY(plat) + 16.0f);
+            if (overPlatform && nearTop) {
+                go::setPosition(player, playerX + platformDeltaX[i], go::getY(plat) - playerH);
+                go::setVelocityY(player, 0.0f);
                 isGrounded = true;
             }
         }
 
         // Check main floor ground collision
         if (!isGrounded) {
-            // Check if player position is over water pit 1 or cliff pit 2
+            playerX = go::getX(player);
+            playerY = go::getY(player);
+
+            // Check if player position is over water pit 1, cliff pit 2, or water pit 3
             bool overWater = (playerX + playerW > GAP_START) && (playerX < GAP_END);
             bool overCliff = (playerX + playerW > GAP2_START) && (playerX < GAP2_END);
-            bool overAnyGap = overWater || overCliff;
+            bool overWater3 = (playerX + playerW > GAP3_START) && (playerX < GAP3_END);
+            bool overAnyGap = overWater || overCliff || overWater3;
 
             // Stand on solid floor if not over a gap
             if (!overAnyGap && playerY >= groundY - playerH) {
-                player.setPosition(playerX, groundY - playerH);
-                player.setVelocityY(0.0f);
-                player.setGrounded(true);
+                go::setPosition(player, playerX, groundY - playerH);
+                go::setVelocityY(player, 0.0f);
                 isGrounded = true;
-            } else if (overAnyGap && playerY > actualHeight) {
-                // Respawn if player falls into any water or cliff gap
-                SDL_Log("Player fell into a gap. Respawning...");
-                player.setPosition(START_X, START_Y);
-                player.setVelocity(0.0f, 0.0f);
-                player.setGrounded(false);
-            } else if (!overAnyGap) {
-                player.setGrounded(false);
+            }
+        }
+        go::setGrounded(player, isGrounded);
+
+        // Death zones: touching one sends the player to that zone's spawn point
+        for (const auto& zone : deathZones) {
+            if (Collision::checkCollision(player, zone)) {
+                SDL_Log("Player fell into a death zone. Respawning...");
+                respawnPlayer(zone.getComponent<DeathZoneComponent>()->spawnId);
+                isGrounded = false;
+                break;
             }
         }
 
-        // Enemy collision check (slime touches player)
-        Entity slimeEntity(slimeX, slimeY, (float)SLIME_FRAME_W * 1.5f, (float)SLIME_FRAME_H * 1.5f);
-        if (Collision::checkCollision(player, slimeEntity)) {
-            SDL_Log("Player touched slime enemy. Respawning...");
-            player.setPosition(START_X, START_Y);
-            player.setVelocity(0.0f, 0.0f);
-            player.setGrounded(false);
+        // Side-scrolling boundaries: put them at the left/right part of the window,
+        // then scroll the camera if the player touches one.
+        go::setPosition(leftScrollZone, cameraX, 0.0f);
+        if (auto* t = leftScrollZone.getComponent<TransformComponent>()) {
+            t->width = (float)actualWidth * SCROLL_LEFT_FRACTION;
         }
+        go::setPosition(rightScrollZone, cameraX + (float)actualWidth * SCROLL_RIGHT_FRACTION, 0.0f);
+        if (auto* t = rightScrollZone.getComponent<TransformComponent>()) {
+            t->width = (float)actualWidth * (1.0f - SCROLL_RIGHT_FRACTION);
+        }
+
+        if (Collision::checkCollision(player, rightScrollZone)) {
+            // Push the screen right by however far the player is inside the boundary
+            cameraX += (go::getX(player) + go::getWidth(player)) - go::getX(rightScrollZone);
+        } else if (Collision::checkCollision(player, leftScrollZone)) {
+            // Push the screen left by however far the player is inside the boundary
+            cameraX -= (go::getX(leftScrollZone) + go::getWidth(leftScrollZone)) - go::getX(player);
+        }
+        cameraX = std::clamp(cameraX, 0.0f, maxCameraX);
 
         // Determine warrior animation state based on movement
         CharacterState currentState = CharacterState::Idle;
@@ -549,10 +670,10 @@ int main(int argc, char* argv[]) {
         int maxFrames = 5;  // number of frames in the current animation row
         float animFPS = 8.0f; // speed of the current animation in frames per second (FPS)
 
-        float vy = player.getVelocityY();
+        float vy = go::getVelocityY(player);
 
         // Check if player is airborne first
-        if (!player.isGrounded() || vy < -1.0f || vy > 10.0f) {
+        if (!isGrounded || vy < -1.0f || vy > 10.0f) {
             if (vy < -1.0f) {
                 currentState = CharacterState::Jump;
                 row = 4; // Jump animation row
@@ -609,6 +730,7 @@ int main(int argc, char* argv[]) {
         warriorCurrentFrame = preparedTask.warriorFrame;
         slimeX = preparedTask.slimeX;
         slimeCurrentFrame = preparedTask.slimeFrame;
+        go::setPosition(slime, slimeX, slimeY);
 
         // Turn around slime at boundaries
         if (slimeX > 800.0f) {
@@ -617,14 +739,20 @@ int main(int argc, char* argv[]) {
             slimeDir = 1.0f;
         }
 
+        // Enemy collision check (slime touches player): back to spawn point 1
+        if (Collision::checkCollision(player, slime)) {
+            SDL_Log("Player touched slime enemy. Respawning...");
+            respawnPlayer(1);
+        }
+
         // Keep sharedData updated with current time scale so networking thread syncs its loop rate
         sharedData.currentTimeScale.store(static_cast<float>(gameTime.getScale()));
 
-        // Give the networking thread our latest player state
+        // Give the networking thread our latest player state (world position)
         if (online) {
             std::lock_guard<std::mutex> lock(sharedData.playerMutex);
-            sharedData.playerX = player.getX();
-            sharedData.playerY = player.getY();
+            sharedData.playerX = go::getX(player);
+            sharedData.playerY = go::getY(player);
             sharedData.playerFacingRight = facingRight;
             sharedData.playerRow = row;
             sharedData.playerFrame = warriorCurrentFrame;
@@ -646,14 +774,38 @@ int main(int argc, char* argv[]) {
             Scaling::getScaleFactors(renderW, renderH, scaleX, scaleY);
         }
 
-        // Helper function that scales draw rectangles according to screen resolution
-        auto scaleRect = [scaleX, scaleY](SDL_FRect r) -> SDL_FRect {
+        // Scales a rectangle for the window size, with NO camera (for the background)
+        auto scaleRectFixed = [scaleX, scaleY](SDL_FRect r) -> SDL_FRect {
             return { r.x * scaleX, r.y * scaleY, r.w * scaleX, r.h * scaleY };
         };
 
+        // Same, but also shifts by the camera. Every world object is drawn with this,
+        // which is what creates the side-scrolling effect.
+        auto scaleRect = [scaleX, scaleY, cameraX](SDL_FRect r) -> SDL_FRect {
+            return { (r.x - cameraX) * scaleX, r.y * scaleY, r.w * scaleX, r.h * scaleY };
+        };
+
+        // Draws a platform from its TileStyleComponent: left end, middle tiles, right end
+        auto drawTiledPlatform = [&](const GameObject& plat) {
+            const auto* t = plat.getComponent<TransformComponent>();
+            const auto* style = plat.getComponent<TileStyleComponent>();
+            if (!t || !style) return;
+            int tileCount = (int)(t->width / tileSize + 0.5f);
+            for (int i = 0; i < tileCount; ++i) {
+                SDL_Texture* tex = style->middle;
+                if (i == 0) tex = style->left;
+                else if (i == tileCount - 1) tex = style->right;
+                if (!tex) continue;
+                SDL_SetTextureColorMod(tex, style->tintR, style->tintG, style->tintB);
+                SDL_FRect dst = scaleRect({ t->x + i * tileSize, t->y, tileSize, tileSize });
+                SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                SDL_SetTextureColorMod(tex, 255, 255, 255);
+            }
+        };
+
         /* Draw Background Elements */
-        // Stretch full background picture across screen
-        SDL_FRect bgDst = scaleRect({ 0.0f, 0.0f, (float)actualWidth, (float)actualHeight });
+        // Stretch full background picture across screen (it does not scroll)
+        SDL_FRect bgDst = scaleRectFixed({ 0.0f, 0.0f, (float)actualWidth, (float)actualHeight });
         SDL_RenderTexture(renderer, bgTexture, nullptr, &bgDst);
 
         // Draw willow tree decoration
@@ -669,6 +821,9 @@ int main(int argc, char* argv[]) {
         const float treeHeight = 128.0f * treeScale;
         SDL_FRect treeDst = scaleRect({ 1250.0f, groundY - treeHeight, treeWidth, treeHeight });
         SDL_RenderTexture(renderer, deadTreeTexture, nullptr, &treeDst);
+        // A second dead tree in the new part of the level
+        SDL_FRect tree2Dst = scaleRect({ 2750.0f, groundY - treeHeight, treeWidth, treeHeight });
+        SDL_RenderTexture(renderer, deadTreeTexture, nullptr, &tree2Dst);
 
         /* Draw Main Ground Floor Tiles */
         // Left corner tile (Tile_01)
@@ -719,97 +874,30 @@ int main(int argc, char* argv[]) {
             SDL_RenderTexture(renderer, tile02Texture, nullptr, &scaledTileRect);
         }
 
-        /* Draw Floating Islands */
-        // Floating island A (thin)
-        SDL_FRect isARect = { 450.0f, islandAY, tileSize, tileSize };
-        scaledTileRect = scaleRect(isARect);
-        SDL_RenderTexture(renderer, tile07Texture, nullptr, &scaledTileRect);
-        isARect.x += tileSize;
-        scaledTileRect = scaleRect(isARect);
-        SDL_RenderTexture(renderer, tile08Texture, nullptr, &scaledTileRect);
-        isARect.x += tileSize;
-        scaledTileRect = scaleRect(isARect);
-        SDL_RenderTexture(renderer, tile08Texture, nullptr, &scaledTileRect);
-        isARect.x += tileSize;
-        scaledTileRect = scaleRect(isARect);
-        SDL_RenderTexture(renderer, tile09Texture, nullptr, &scaledTileRect);
+        // Ground for the new part of the level: grass all the way to the end of the
+        // world, except for the third water pit (with its own water tiles).
+        for (float gx = tile2Rect.x + tileSize; gx < WORLD_WIDTH; gx += tileSize) {
+            SDL_Texture* groundTile = tile02Texture;
+            if (gx >= GAP3_START && gx < GAP3_END) {
+                // Water pit: left, middle, right water tiles
+                groundTile = (gx == GAP3_START) ? tile20Texture
+                           : (gx + tileSize >= GAP3_END) ? tile50Texture : tile30Texture;
+            } else if (gx + tileSize == GAP3_START) {
+                groundTile = tile03Texture; // bank edge before the pit
+            } else if (gx == GAP3_END) {
+                groundTile = tile01Texture; // bank edge after the pit
+            }
+            SDL_FRect groundRect = scaleRect({ gx, groundY, tileSize, tileSize });
+            SDL_RenderTexture(renderer, groundTile, nullptr, &groundRect);
+        }
 
-        // Floating island B (thin)
-        SDL_FRect isBRect = { 950.0f, islandBY, tileSize, tileSize };
-        scaledTileRect = scaleRect(isBRect);
-        SDL_RenderTexture(renderer, tile07Texture, nullptr, &scaledTileRect);
-        isBRect.x += tileSize;
-        scaledTileRect = scaleRect(isBRect);
-        SDL_RenderTexture(renderer, tile08Texture, nullptr, &scaledTileRect);
-        isBRect.x += tileSize;
-        scaledTileRect = scaleRect(isBRect);
-        SDL_RenderTexture(renderer, tile09Texture, nullptr, &scaledTileRect);
-
-        // Floating thick platform
-        SDL_FRect platRect = { 420.0f, platY, tileSize, tileSize };
-        scaledTileRect = scaleRect(platRect);
-        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect); // Left end
-        platRect.x += tileSize;
-        scaledTileRect = scaleRect(platRect);
-        SDL_RenderTexture(renderer, tile33Texture, nullptr, &scaledTileRect); // Middle segment
-        platRect.x += tileSize;
-        scaledTileRect = scaleRect(platRect);
-        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect); // Right end
-
-        // Floating thick platform
-        SDL_FRect highPlatRect = { 180.0f, highPlatY, tileSize, tileSize };
-        scaledTileRect = scaleRect(highPlatRect);
-        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect);
-        highPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(highPlatRect);
-        SDL_RenderTexture(renderer, tile33Texture, nullptr, &scaledTileRect);
-        highPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(highPlatRect);
-        SDL_RenderTexture(renderer, tile33Texture, nullptr, &scaledTileRect);
-        highPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(highPlatRect);
-        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect);
-
-        // Floating thin platform
-        SDL_FRect high2PlatRect = { 80.0f, high2PlatY, tileSize, tileSize };
-        scaledTileRect = scaleRect(high2PlatRect);
-        SDL_RenderTexture(renderer, tile07Texture, nullptr, &scaledTileRect);
-        high2PlatRect.x += tileSize;
-        scaledTileRect = scaleRect(high2PlatRect);
-        SDL_RenderTexture(renderer, tile08Texture, nullptr, &scaledTileRect);
-        high2PlatRect.x += tileSize;
-        scaledTileRect = scaleRect(high2PlatRect);
-        SDL_RenderTexture(renderer, tile09Texture, nullptr, &scaledTileRect);
-
-        // Floating thin platform
-        SDL_FRect high3PlatRect = { 700.0f, high3PlatY, tileSize, tileSize };
-        scaledTileRect = scaleRect(high3PlatRect);
-        SDL_RenderTexture(renderer, tile07Texture, nullptr, &scaledTileRect);
-        high3PlatRect.x += tileSize;
-        scaledTileRect = scaleRect(high3PlatRect);
-        SDL_RenderTexture(renderer, tile08Texture, nullptr, &scaledTileRect);
-        high3PlatRect.x += tileSize;
-        scaledTileRect = scaleRect(high3PlatRect);
-        SDL_RenderTexture(renderer, tile09Texture, nullptr, &scaledTileRect);
-
-        // Floating thick platform
-        SDL_FRect rightPlatRect = { 1250.0f, rightPlatY, tileSize, tileSize };
-        scaledTileRect = scaleRect(rightPlatRect);
-        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect);
-        rightPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(rightPlatRect);
-        SDL_RenderTexture(renderer, tile33Texture, nullptr, &scaledTileRect);
-        rightPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(rightPlatRect);
-        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect);
-
-        // Shared moving platform (Section 5)
-        SDL_FRect movingPlatRect = { movingPlatform.getX(), movingPlatform.getY(), tileSize, tileSize };
-        scaledTileRect = scaleRect(movingPlatRect);
-        SDL_RenderTexture(renderer, tile32Texture, nullptr, &scaledTileRect); // Left end
-        movingPlatRect.x += tileSize;
-        scaledTileRect = scaleRect(movingPlatRect);
-        SDL_RenderTexture(renderer, tile34Texture, nullptr, &scaledTileRect); // Right end
+        /* Draw Platforms (static and moving) */
+        for (const auto& plat : platforms) {
+            drawTiledPlatform(plat);
+        }
+        for (const auto& plat : movingPlatforms) {
+            drawTiledPlatform(plat);
+        }
 
         /* Draw Decorative Objects */
         const float boxSize = 56.0f;
@@ -873,9 +961,31 @@ int main(int argc, char* argv[]) {
         SDL_FRect grassHigh3Dst = scaleRect({ 830.0f, high3PlatY - 32.0f, 32.0f, 32.0f });
         SDL_RenderTexture(renderer, grass1Texture, nullptr, &grassHigh3Dst);
 
-        /* Draw Animated Spawn Portal */
-        portal.updateAnimation(deltaTime);
-        portal.render(renderer);
+        // New decorations in the scrolling part of the level
+        SDL_FRect bushNewDst = scaleRect({ 1560.0f, groundY - 48.0f, 96.0f, 48.0f });
+        SDL_RenderTexture(renderer, bush3Texture, nullptr, &bushNewDst);
+
+        SDL_FRect boxNewDst = scaleRect({ 2060.0f, elevatorTopY - boxSize, boxSize, boxSize });
+        SDL_RenderTexture(renderer, box2Texture, nullptr, &boxNewDst);
+
+        SDL_FRect stoneNewDst = scaleRect({ 2900.0f, groundY - 68.0f, 56.0f, 68.0f });
+        SDL_RenderTexture(renderer, stone2Texture, nullptr, &stoneNewDst);
+
+        SDL_FRect ridgeNewDst = scaleRect({ 3450.0f, groundY - 44.0f, 128.0f, 44.0f });
+        SDL_RenderTexture(renderer, ridge5Texture, nullptr, &ridgeNewDst);
+
+        /* Draw Animated Spawn Portals (one on top of each hidden spawn point) */
+        portalTimer += deltaTime;
+        int portalFrame = (int)(portalTimer * PORTAL_FPS) % PORTAL_FRAME_COUNT;
+        if (portalTexture) {
+            SDL_FRect portalSrc = { (float)(portalFrame * PORTAL_FRAME_W), 0.0f,
+                                    (float)PORTAL_FRAME_W, (float)PORTAL_FRAME_H };
+            for (const auto& sp : spawnPoints) {
+                SDL_FRect portalDst = scaleRect({ go::getX(sp) - 24.0f, go::getY(sp),
+                                                  (float)PORTAL_FRAME_W, (float)PORTAL_FRAME_H });
+                SDL_RenderTexture(renderer, portalTexture, &portalSrc, &portalDst);
+            }
+        }
 
         /* Draw Slime Enemy */
         if (slimeTexture) {
@@ -888,10 +998,10 @@ int main(int argc, char* argv[]) {
             };
             // Destination rectangle on screen
             SDL_FRect slimeDst = scaleRect({
-                slimeX,
-                slimeY,
-                (float)SLIME_FRAME_W * 1.5f,
-                (float)SLIME_FRAME_H * 1.5f
+                go::getX(slime),
+                go::getY(slime),
+                go::getWidth(slime),
+                go::getHeight(slime)
             });
             // Flip texture horizontally when walking left
             SDL_FlipMode slimeFlip = (slimeDir < 0.0f) ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
@@ -919,7 +1029,8 @@ int main(int argc, char* argv[]) {
                     (float)WARRIOR_FRAME_W,
                     (float)WARRIOR_FRAME_H
                 };
-                SDL_FRect otherDst = scaleRect({ other.x, other.y, player.getWidth(), player.getHeight() });
+                // Remote positions are world positions, so scaleRect applies our camera
+                SDL_FRect otherDst = scaleRect({ other.x, other.y, go::getWidth(player), go::getHeight(player) });
                 SDL_FlipMode otherFlip = other.facingRight ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
                 SDL_RenderTextureRotated(renderer, warriorTexture, &otherSrc, &otherDst, 0.0, nullptr, otherFlip);
             }
@@ -939,10 +1050,10 @@ int main(int argc, char* argv[]) {
             };
             // Destination rectangle on screen
             SDL_FRect warriorDst = scaleRect({
-                player.getX(),
-                player.getY(),
-                player.getWidth(),
-                player.getHeight()
+                go::getX(player),
+                go::getY(player),
+                go::getWidth(player),
+                go::getHeight(player)
             });
             // Flip texture horizontally when facing left
             SDL_FlipMode flip = facingRight ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
