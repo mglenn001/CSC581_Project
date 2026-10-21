@@ -2,7 +2,6 @@
 
 Physics::Physics(float gravity)
 {
-    // Store the gravity value used by the physics system
     this->gravity = gravity;
 }
 
@@ -18,19 +17,18 @@ float Physics::getGravity() const
 
 void Physics::update(Entity& entity, float deltaTime)
 {
-    // Do not apply gravity if it is disabled for this entity
     if (!entity.isGravityEnabled()) {
         return;
     }
 
     float velocityY = entity.getVelocityY();
 
-    // Increase downward speed based on gravity and time
+    // Constant downward acceleration
     velocityY += gravity * deltaTime;
 
     entity.setVelocityY(velocityY);
 
-    // Move the entity based on its current velocity
+    // Move entity follow its current velocity
     entity.move(
         entity.getVelocityX() * deltaTime,
         velocityY * deltaTime
@@ -39,14 +37,41 @@ void Physics::update(Entity& entity, float deltaTime)
 
 void Physics::jump(Entity& entity, float jumpStrength)
 {
-    // The entity can only jump when it is on the ground
     if (!entity.isGrounded()) {
         return;
     }
 
-    // A negative Y velocity moves the entity upward in SDL coordinates
+    // Negative Y moves upward in SDL coordinates
     entity.setVelocityY(-jumpStrength);
-
-    // The entity is no longer on the ground after jumping
     entity.setGrounded(false);
+}
+
+void Physics::update(GameObject& obj, float deltaTime)
+{
+    auto* gravityComp = obj.getComponent<GravityComponent>();
+    auto* transform = obj.getComponent<TransformComponent>();
+    auto* velocity = obj.getComponent<VelocityComponent>();
+
+    // No gravity component (or nothing to move) means physics skips it
+    if (!gravityComp || !transform || !velocity) {
+        return;
+    }
+
+    velocity->vy += gravity * deltaTime;
+
+    transform->x += velocity->vx * deltaTime;
+    transform->y += velocity->vy * deltaTime;
+}
+
+void Physics::jump(GameObject& obj, float jumpStrength)
+{
+    auto* gravityComp = obj.getComponent<GravityComponent>();
+    auto* velocity = obj.getComponent<VelocityComponent>();
+
+    if (!gravityComp || !velocity || !gravityComp->grounded) {
+        return;
+    }
+
+    velocity->vy = -jumpStrength;
+    gravityComp->grounded = false;
 }

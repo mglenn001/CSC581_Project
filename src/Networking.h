@@ -2,12 +2,16 @@
 
 #include "SharedData.h"
 
-// Section 5: Runs on its own thread. Sends this client's player directly to
-// every other peer and stores the players it hears from in sharedData.
-// There is no server in the middle.
+// Handles peer-to-peer networking on its own thread, sending local 
+// player state and storing received player data.
 void networkingThread(SharedData& sharedData, int clientID);
 
-// Section 5: Where the moving platform is right now.
-// Every peer calls this and gets the same answer, because it only depends on
-// the shared wall clock (not on this client's timeline or start time).
+// Computes a repeating wave value based on the shared wall clock.
+// Returns a value between minValue and maxValue.
+float getSharedWave(float minValue, float maxValue, double speed);
+
+// Calculates horizontal X position for a moving platform.
 float getSharedPlatformX();
+
+// Calculates vertical Y position for a moving platform.
+float getSharedPlatformY(float topY, float bottomY);
