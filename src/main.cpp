@@ -14,7 +14,7 @@
 #include <string>
 #include <thread>
 #include <mutex>
-
+ 
 #include "Entity.h"
 #include "Physics.h"
 #include "Input.h"
@@ -22,6 +22,7 @@
 #include "Scaling.h"
 #include "Timeline.h"
 #include "EventManager.h"
+#include "ReplaySystem.h"
 #include "SharedData.h"
 #include "Networking.h"
 #include "GameObjectFactory.h"
@@ -395,6 +396,7 @@ int main(int argc, char* argv[]) {
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
     bool isMoving = false; // set by the Input event handler each frame
+    int row = 0; // current warrior animation row (idle, walk, ...); the replay sets it too
  
     // Portal animation timer (the portals are drawn on top of the hidden spawn points)
     float portalTimer = 0.0f;
@@ -431,6 +433,7 @@ int main(int argc, char* argv[]) {
     const int64_t SPAWN_PROTECTION_MS = 1500;
     int eventCounts[4] = {0, 0, 0, 0}; // handled events: Input, Collision, Death, Spawn
     int revives = 0; // how many other players this client has revived
+    bool autoReplay = false; // G key: record every life and replay it when the player dies
  
     // Tombstones left by dead players (ours and other clients'), one per player
     std::vector<GameObject> tombstones;
@@ -527,7 +530,7 @@ int main(int argc, char* argv[]) {
     // DEATH event: Counts the death and asks for a respawn at the right spawn point.
     events.subscribe(EventType::Death, [&](const GameEvent& e) {
         eventCounts[2]++;
-        // Death from another client: just leave a tombstone where they died
+        // Death from ANOTHER client: just leave a tombstone where they died
         if (e.sourceId != clientID) {
             placeTombstone(e.sourceId, e.x, e.y);
             addNotice("Player " + std::to_string(e.sourceId) + " died (" + e.detail + ")");
@@ -544,6 +547,9 @@ int main(int argc, char* argv[]) {
         }
         raiseEvent(EventType::Spawn, EventPriority::High, "portal",
                    go::getX(*spawn), go::getY(*spawn), spawn->getComponent<SpawnPointComponent>()->spawnId);
+        // In-game replay trigger: our death starts playback of the life that just ended (2x speed).
+        // The replay system handles this event, just like it handles the R and V keys.
+        if (autoReplay) raiseEvent(EventType::ReplayPlaybackStart, EventPriority::High, "death replay", 2.0f);
     });
  
     // SPAWN event: Puts the player at the spawn point and moves the camera there.
@@ -582,6 +588,94 @@ int main(int argc, char* argv[]) {
     } else {
         SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
     }
+
+    /* Milestone 4: Replay System */
+    // The replay system is controlled only by replay events (see ReplaySystem.h).
+    //   R = start / stop recording      V = start / stop playback
+    //   G = auto mode: record every life and replay it when you die
+    //   - / = during playback, change the replay speed
+    ReplaySystem replay(events, [&]() { return gameTime.getTime(); });
+ 
+    // The replay runs on its own real-time clock, so pausing or slowing the game does not change it
+    Timeline replayClock;
+ 
+    // IDs for objects in a recorded frame (players use their client ID, 1-4)
+    const int REPLAY_SLIME_ID = 100;
+    const int REPLAY_MOVER_ID = 101; // moving platforms are 101, 102, ...
+    const int REPLAY_CAMERA_ID = 200;
+ 
+    // Other players' recorded state while a replay plays
+    std::vector<ReplayObjectState> replayOthers;
+ 
+    // What one recorded frame stores. Extra data is packed into vx / vy:
+    //   players: vx = facing right (1/0), vy = animation row * 100 + frame
+    //   slime:   vx = walk direction,     vy = animation frame
+    //   camera:  x = cameraX
+    replay.setSnapshotSource([&]() {
+        std::vector<ReplayObjectState> objects;
+        objects.push_back({clientID, go::getX(player), go::getY(player),
+                           facingRight ? 1.0f : 0.0f, (float)(row * 100 + warriorCurrentFrame)});
+        objects.push_back({REPLAY_SLIME_ID, slimeX, slimeY, slimeDir, (float)slimeCurrentFrame});
+        for (size_t i = 0; i < movingPlatforms.size(); ++i) {
+            objects.push_back({REPLAY_MOVER_ID + (int)i, go::getX(movingPlatforms[i]), go::getY(movingPlatforms[i]), 0.0f, 0.0f});
+        }
+        objects.push_back({REPLAY_CAMERA_ID, cameraX, 0.0f, 0.0f, 0.0f});
+        std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+        for (const auto& entry : sharedData.remotePlayers) {
+            const RemotePlayerState& r = entry.second;
+            objects.push_back({entry.first, r.x, r.y, r.facingRight ? 1.0f : 0.0f, (float)(r.row * 100 + r.frame)});
+        }
+        return objects;
+    });
+ 
+    // How a recorded frame is shown (also used to put the live game back when playback ends)
+    replay.setApplyFrame([&](const ReplayFrame& frame) {
+        replayOthers.clear();
+        for (const ReplayObjectState& o : frame.objects) {
+            if (o.id == clientID) {
+                go::setPosition(player, o.x, o.y);
+                go::setVelocity(player, 0.0f, 0.0f);
+                facingRight = o.vx > 0.5f;
+                row = (int)o.vy / 100;
+                warriorCurrentFrame = (int)o.vy % 100;
+            } else if (o.id == REPLAY_SLIME_ID) {
+                slimeX = o.x;
+                slimeDir = o.vx;
+                slimeCurrentFrame = (int)o.vy;
+                go::setPosition(slime, o.x, o.y);
+            } else if (o.id == REPLAY_CAMERA_ID) {
+                cameraX = o.x;
+            } else if (o.id >= REPLAY_MOVER_ID && o.id < REPLAY_MOVER_ID + (int)movingPlatforms.size()) {
+                go::setPosition(movingPlatforms[o.id - REPLAY_MOVER_ID], o.x, o.y);
+            } else {
+                replayOthers.push_back(o); // another player
+            }
+        }
+    });
+ 
+    // Recorded events are shown again when they happened. Input and scroll events
+    // happen every frame, so they are skipped.
+    replay.setEventPlayback([&](const GameEvent& e) {
+        const char* name = nullptr;
+        switch (e.type) {
+            case EventType::Collision: name = "Collision"; break;
+            case EventType::Death: name = "Death"; break;
+            case EventType::Spawn: name = "Spawn"; break;
+            default: break;
+        }
+        if (!name || e.detail == "scroll") return;
+        std::string text = std::string("REPLAY ") + name + ": " + e.detail;
+        for (const Notice& n : notices) {
+            if (n.text == text) return; // a collision repeats every frame: show it once
+        }
+        addNotice(text);
+    });
+ 
+    replay.setStatusCallback([&](const std::string& text) { addNotice(text); });
+ 
+    bool recordKeyWasPressed = false;
+    bool playKeyWasPressed = false;
+    bool autoKeyWasPressed = false;
  
     /* Main Game Loop */
     bool running = true; // keeps the main game loop running
@@ -630,7 +724,13 @@ int main(int argc, char* argv[]) {
         bool minusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_MINUS);
         bool plusKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_EQUALS);
  
-        if (minusKeyIsPressed && !minusKeyWasPressed) {
+        if (replay.isPlaying()) {
+            // During a replay, - and = change the replay speed instead
+            if (minusKeyIsPressed && !minusKeyWasPressed)
+                replay.requestSpeed(replay.speed() > 1.0f ? 1.0f : 0.5f);
+            if (plusKeyIsPressed && !plusKeyWasPressed)
+                replay.requestSpeed(replay.speed() < 1.0f ? 1.0f : 2.0f);
+        } else if (minusKeyIsPressed && !minusKeyWasPressed) {
             double currentScale = gameTime.getScale();
             if (currentScale == 2.0) {
                 gameTime.setScale(1.0);
@@ -640,7 +740,7 @@ int main(int argc, char* argv[]) {
             SDL_Log("Game time scale: %.1fx", gameTime.getScale());
         }
  
-        if (plusKeyIsPressed && !plusKeyWasPressed) {
+        if (!replay.isPlaying() && plusKeyIsPressed && !plusKeyWasPressed) {
             double currentScale = gameTime.getScale();
             if (currentScale == 0.5) {
                 gameTime.setScale(1.0);
@@ -665,6 +765,42 @@ int main(int argc, char* argv[]) {
             }
         }
         freezeSlimeKeyWasPressed = freezeSlimeKeyIsPressed;
+ 
+        // Replay keys only RAISE replay events. The replay system handles them on dispatch.
+        // 'G' turns auto death replay on/off (it keeps recording each life by itself).
+        bool autoKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_G);
+        if (autoKeyIsPressed && !autoKeyWasPressed) {
+            autoReplay = !autoReplay;
+            addNotice(autoReplay ? "Auto death replay: ON" : "Auto death replay: OFF");
+            if (!autoReplay && replay.isRecording()) replay.requestRecordStop();
+        }
+        autoKeyWasPressed = autoKeyIsPressed;
+ 
+        // 'R' starts / stops recording (manual mode)
+        bool recordKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_R);
+        if (recordKeyIsPressed && !recordKeyWasPressed && !autoReplay && !replay.isPlaying()) {
+            if (replay.isRecording()) replay.requestRecordStop();
+            else replay.requestRecordStart();
+        }
+        recordKeyWasPressed = recordKeyIsPressed;
+ 
+        // 'V' starts playback (manual mode) or stops it early (any mode)
+        bool playKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_V);
+        if (playKeyIsPressed && !playKeyWasPressed) {
+            if (replay.isPlaying()) replay.requestPlaybackStop();
+            else if (!autoReplay) replay.requestPlaybackStart(1.0f);
+        }
+        playKeyWasPressed = playKeyIsPressed;
+ 
+        // Auto mode: Keep a recording running so a death can be replayed.
+        if (autoReplay && !replay.isRecording() && !replay.isPlaying()) replay.requestRecordStart();
+ 
+        // Called every frame so the replay clock never jumps
+        double replayDelta = replayClock.getDeltaTime();
+ 
+        // While a replay plays, the live game is frozen: no input, physics, collisions or
+        // movers. The replay system moves the objects instead.
+        if (!replay.isPlaying()) {
  
         // Player inputs & movement
         const float WALK_SPEED = 200.0f;
@@ -708,6 +844,8 @@ int main(int argc, char* argv[]) {
             float newValue = getSharedWave(pattern->minValue, pattern->maxValue, pattern->speed);
             if (pattern->axis == MoveAxis::Horizontal) {
                 platformDeltaX[i] = newValue - t->x;
+                // Right after a replay the platform "jumps" back to the live spot: don't carry the rider
+                if (std::fabs(platformDeltaX[i]) > 60.0f) platformDeltaX[i] = 0.0f;
                 t->x = newValue;
             } else {
                 t->y = newValue;
@@ -811,7 +949,7 @@ int main(int argc, char* argv[]) {
  
         // Determine warrior animation state based on movement
         CharacterState currentState = CharacterState::Idle;
-        int row = 0; // first row of the warrior sprite sheet is idle animation
+        row = 0; // first row of the warrior sprite sheet is idle animation
         int maxFrames = 5; // number of frames in the current animation row
         float animFPS = 8.0f; // speed of the current animation in frames per second (FPS)
  
@@ -917,6 +1055,12 @@ int main(int argc, char* argv[]) {
             sharedData.playerRow = row;
             sharedData.playerFrame = warriorCurrentFrame;
         }
+ 
+        } // end of live simulation (skipped during replay playback)
+ 
+        // Record this frame, or move the playback forward, then handle replay events
+        replay.update(replayDelta);
+        events.dispatch();
  
         /* Render Game Objects */
         // Clear the screen to black before drawing the next frame
@@ -1186,7 +1330,12 @@ int main(int argc, char* argv[]) {
         if (online && warriorTexture) {
             // Copy the list so we don't hold the lock while drawing
             std::unordered_map<int, RemotePlayerState> others;
-            {
+            if (replay.isPlaying()) {
+                // During a replay, draw where the other players were when it was recorded
+                for (const ReplayObjectState& o : replayOthers) {
+                    others[o.id] = { o.x, o.y, o.vx > 0.5f, (int)o.vy / 100, (int)o.vy % 100, 0 };
+                }
+            } else {
                 std::lock_guard<std::mutex> lock(sharedData.playerMutex);
                 others = sharedData.remotePlayers;
             }
@@ -1238,7 +1387,7 @@ int main(int argc, char* argv[]) {
             SDL_SetTextureAlphaMod(warriorTexture, 255);
         }
  
-        /* Draw Event HUD: death count, events handled, and recent event messages */
+        // Draw Event HUD: Death count, events handled, and recent event messages.
         {
             char hud[128];
             SDL_snprintf(hud, sizeof(hud), "Deaths: %d   Revives: %d", deaths, revives);
@@ -1247,6 +1396,25 @@ int main(int argc, char* argv[]) {
             SDL_snprintf(hud, sizeof(hud), "Events handled  Input:%d Collision:%d Death:%d Spawn:%d",
                          eventCounts[0], eventCounts[1], eventCounts[2], eventCounts[3]);
             SDL_RenderDebugText(renderer, 10.0f, 24.0f, hud);
+ 
+            // Replay status line (bottom-left)
+            char replayText[160];
+            if (replay.isRecording()) {
+                SDL_snprintf(replayText, sizeof(replayText), "REC %llds%s", (long long)(replay.durationMs() / 1000),
+                             autoReplay ? "  (auto: replays when you die)" : "  (R = stop)");
+                SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255);
+            } else if (replay.isPlaying()) {
+                SDL_snprintf(replayText, sizeof(replayText), "REPLAY %.1fs / %.1fs  speed %.1fx  (V = skip, -/= speed)",
+                             replay.playbackPositionMs() / 1000.0, replay.durationMs() / 1000.0, replay.speed());
+                SDL_SetRenderDrawColor(renderer, 255, 255, 80, 255);
+            } else {
+                SDL_snprintf(replayText, sizeof(replayText), "R = record   V = play replay   G = auto death replay (%s)",
+                             autoReplay ? "ON" : "OFF");
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            }
+            int outW = 0, outH = 0;
+            SDL_GetRenderOutputSize(renderer, &outW, &outH);
+            SDL_RenderDebugText(renderer, 10.0f, outH - 20.0f, replayText);
  
             // Drop expired messages, then draw the rest
             const Uint64 nowTicks = SDL_GetTicks();
