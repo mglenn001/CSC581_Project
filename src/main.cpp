@@ -4,7 +4,7 @@
     UnityID: mglenn2
     Team: 8
     Class: CSC 581 - Game Engine Foundations
-    Date: 9/30/2026
+    Date: 11/9/2026
 */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -21,6 +21,7 @@
 #include "Collision.h"
 #include "Scaling.h"
 #include "Timeline.h"
+#include "EventManager.h"
 #include "SharedData.h"
 #include "Networking.h"
 #include "GameObjectFactory.h"
@@ -388,22 +389,10 @@ int main(int argc, char* argv[]) {
     float warriorAnimTimer = 0.0f; // timer to control animation speed
     int warriorCurrentFrame = 0; // current frame index being drawn
     bool facingRight = true; // true if facing right, false if facing left
+    bool isMoving = false; // set by the Input event handler each frame
 
     // Portal animation timer (the portals are drawn on top of the hidden spawn points)
     float portalTimer = 0.0f;
-
-    // Sends the player to a spawn point and moves the camera so the spawn is on screen
-    auto respawnPlayer = [&](int spawnId) {
-        for (const auto& sp : spawnPoints) {
-            if (sp.getComponent<SpawnPointComponent>()->spawnId == spawnId) {
-                go::setPosition(player, go::getX(sp), go::getY(sp));
-                go::setVelocity(player, 0.0f, 0.0f);
-                go::setGrounded(player, false);
-                cameraX = std::clamp(go::getX(sp) - (float)actualWidth * 0.5f, 0.0f, maxCameraX);
-                return;
-            }
-        }
-    };
 
     /* Section 1: Time Management Setup */
     // Global timeline: master clock for the whole game world (root, anchored to real time)
@@ -418,6 +407,99 @@ int main(int argc, char* argv[]) {
     bool minusKeyWasPressed = false;
     bool plusKeyWasPressed = false;
     bool freezeSlimeKeyWasPressed = false;
+
+    /* Milestone 4: Event System Setup */
+    // Gameplay does not act directly. Code that DETECTS something raises an event,
+    // and the handlers below (registered once) decide what happens.
+    EventManager events;
+
+    // Raise an event stamped with the game timeline's time
+    auto raiseEvent = [&](EventType type, EventPriority priority, const std::string& detail,
+                          float x = 0.0f, float y = 0.0f, int targetId = 0) {
+        events.raise(GameEvent{type, priority, gameTime.getTime(), clientID, targetId, detail, x, y});
+    };
+
+    // Game state that the event handlers change
+    int deaths = 0; // how many times the player has died
+    bool deathPending = false; // true from a Death event until its Spawn event (no double deaths)
+    int64_t protectedUntil = 0; // game time (ms) when spawn protection ends
+    const int64_t SPAWN_PROTECTION_MS = 1500;
+    int eventCounts[4] = {0, 0, 0, 0}; // handled events: Input, Collision, Death, Spawn
+
+    // Short on-screen messages so you can see events happening
+    struct Notice { std::string text; Uint64 expiresAt; };
+    std::vector<Notice> notices;
+    auto addNotice = [&](const std::string& text) {
+        notices.push_back({text, SDL_GetTicks() + 3000}); // show for 3 seconds
+        if (notices.size() > 5) notices.erase(notices.begin());
+        SDL_Log("%s", text.c_str());
+    };
+
+    // INPUT event: Moves the player (the key check only raises the event).
+    events.subscribe(EventType::Input, [&](const GameEvent& e) {
+        eventCounts[0]++;
+        if (e.detail == "left") {
+            go::move(player, -e.x, 0.0f); // e.x = distance to move this frame
+            isMoving = true;
+            facingRight = false;
+        } else if (e.detail == "right") {
+            go::move(player, e.x, 0.0f);
+            isMoving = true;
+            facingRight = true;
+        } else if (e.detail == "jump") {
+            physics.jump(player, 650.0f);
+        }
+    });
+
+    // COLLISION event: Reacts to what the player touched (e.detail says what).
+    events.subscribe(EventType::Collision, [&](const GameEvent& e) {
+        if (e.detail == "scroll") {
+            // Side-scrolling boundary: e.x = how far to push the camera
+            cameraX = std::clamp(cameraX + e.x, 0.0f, maxCameraX);
+            return;
+        }
+        eventCounts[1]++;
+        if (e.detail == "slime") {
+            if (gameTime.getTime() < protectedUntil) return; // spawn protection
+            addNotice("Collision: touched slime");
+            raiseEvent(EventType::Death, EventPriority::Critical, "slime", e.x, e.y, 1); // spawn 1
+        } else if (e.detail == "deathzone") {
+            addNotice("Collision: entered death zone");
+            raiseEvent(EventType::Death, EventPriority::Critical, "fell", e.x, e.y, e.targetId);
+        }
+    });
+
+    // DEATH event: Counts the death and asks for a respawn at the right spawn point.
+    events.subscribe(EventType::Death, [&](const GameEvent& e) {
+        if (deathPending) return; // already dying this frame
+        deathPending = true;
+        deaths++;
+        eventCounts[2]++;
+        addNotice("Death: " + e.detail);
+        // e.targetId is the spawn point to use (fall back to the first one)
+        const GameObject* spawn = &spawnPoints[0];
+        for (const auto& sp : spawnPoints) {
+            if (sp.getComponent<SpawnPointComponent>()->spawnId == e.targetId) spawn = &sp;
+        }
+        raiseEvent(EventType::Spawn, EventPriority::High, "portal",
+                   go::getX(*spawn), go::getY(*spawn), spawn->getComponent<SpawnPointComponent>()->spawnId);
+    });
+
+    // SPAWN event: Puts the player at the spawn point and moves the camera there.
+    events.subscribe(EventType::Spawn, [&](const GameEvent& e) {
+        eventCounts[3]++;
+        go::setPosition(player, e.x, e.y);
+        go::setVelocity(player, 0.0f, 0.0f);
+        go::setGrounded(player, false);
+        cameraX = std::clamp(e.x - (float)actualWidth * 0.5f, 0.0f, maxCameraX);
+        deathPending = false;
+        protectedUntil = gameTime.getTime() + SPAWN_PROTECTION_MS; // blink + safe from slime
+        addNotice("Spawn: " + e.detail + " " + std::to_string(e.targetId));
+    });
+
+    // First spawn of the game (also shows registration -> raising -> handling)
+    raiseEvent(EventType::Spawn, EventPriority::High, "initial", START_X, START_Y, 1);
+    events.dispatch();
 
     /* Section 2: Networking Setup */
     // Data shared with the networking thread
@@ -530,24 +612,17 @@ int main(int argc, char* argv[]) {
             moveSpeed = RUN_SPEED;
         }
 
-        // Track if player is holding movement keys
-        bool isMoving = false;
-        // Press 'A' to move left
-        if (Input::isKeyPressed(SDL_SCANCODE_A)) {
-            go::move(player, -moveSpeed * deltaTime, 0.0f);
-            isMoving = true;
-            facingRight = false; // flip sprite to face left
+        // Keys only RAISE Input events. The Input handler (above) moves the player.
+        isMoving = false; // the handler sets this back to true if a move key is held
+        if (!gameTime.isPaused()) {
+            if (Input::isKeyPressed(SDL_SCANCODE_A))
+                raiseEvent(EventType::Input, EventPriority::Normal, "left", moveSpeed * deltaTime);
+            if (Input::isKeyPressed(SDL_SCANCODE_D))
+                raiseEvent(EventType::Input, EventPriority::Normal, "right", moveSpeed * deltaTime);
+            if (Input::isKeyPressed(SDL_SCANCODE_W))
+                raiseEvent(EventType::Input, EventPriority::Normal, "jump");
         }
-        // Press 'D' to move right
-        if (Input::isKeyPressed(SDL_SCANCODE_D)) {
-            go::move(player, moveSpeed * deltaTime, 0.0f);
-            isMoving = true;
-            facingRight = true; // flip sprite to face right
-        }
-        // Press 'W' to jump
-        if (Input::isKeyPressed(SDL_SCANCODE_W)) {
-            physics.jump(player, 650.0f);
-        }
+        events.dispatch(); // apply the input before physics runs
 
         // Apply physics (gravity + velocity)
         physics.update(player, deltaTime);
@@ -630,17 +705,17 @@ int main(int argc, char* argv[]) {
         }
         go::setGrounded(player, isGrounded);
 
-        // Death zones: touching one sends the player to that zone's spawn point
+        // Death zones: Touching one raises a Collision event (its handler raises Death).
         for (const auto& zone : deathZones) {
             if (Collision::checkCollision(player, zone)) {
-                SDL_Log("Player fell into a death zone. Respawning...");
-                respawnPlayer(zone.getComponent<DeathZoneComponent>()->spawnId);
+                raiseEvent(EventType::Collision, EventPriority::High, "deathzone",
+                           go::getX(player), go::getY(player), zone.getComponent<DeathZoneComponent>()->spawnId);
                 isGrounded = false;
                 break;
             }
         }
 
-        // Side-scrolling boundaries: put them at the left/right part of the window,
+        // Side-scrolling boundaries: Put them at the left/right part of the window,
         // then scroll the camera if the player touches one.
         go::setPosition(leftScrollZone, cameraX, 0.0f);
         if (auto* t = leftScrollZone.getComponent<TransformComponent>()) {
@@ -653,12 +728,13 @@ int main(int argc, char* argv[]) {
 
         if (Collision::checkCollision(player, rightScrollZone)) {
             // Push the screen right by however far the player is inside the boundary
-            cameraX += (go::getX(player) + go::getWidth(player)) - go::getX(rightScrollZone);
+            raiseEvent(EventType::Collision, EventPriority::Normal, "scroll",
+                       (go::getX(player) + go::getWidth(player)) - go::getX(rightScrollZone));
         } else if (Collision::checkCollision(player, leftScrollZone)) {
             // Push the screen left by however far the player is inside the boundary
-            cameraX -= (go::getX(leftScrollZone) + go::getWidth(leftScrollZone)) - go::getX(player);
+            raiseEvent(EventType::Collision, EventPriority::Normal, "scroll",
+                       -((go::getX(leftScrollZone) + go::getWidth(leftScrollZone)) - go::getX(player)));
         }
-        cameraX = std::clamp(cameraX, 0.0f, maxCameraX);
 
         // Determine warrior animation state based on movement
         CharacterState currentState = CharacterState::Idle;
@@ -735,11 +811,16 @@ int main(int argc, char* argv[]) {
             slimeDir = 1.0f;
         }
 
-        // Enemy collision check (slime touches player): back to spawn point 1
+        // Enemy collision check: touching the slime raises a Collision event
         if (Collision::checkCollision(player, slime)) {
-            SDL_Log("Player touched slime enemy. Respawning...");
-            respawnPlayer(1);
+            raiseEvent(EventType::Collision, EventPriority::High, "slime");
         }
+
+        // Handlers raise new events, which run on the next dispatch.
+        // Three passes finish Collision -> Death -> Spawn in this same frame.
+        events.dispatch();
+        events.dispatch();
+        events.dispatch();
 
         // Keep sharedData updated with current time scale so networking thread syncs its loop rate
         sharedData.currentTimeScale.store(static_cast<float>(gameTime.getScale()));
@@ -1053,7 +1134,33 @@ int main(int argc, char* argv[]) {
             });
             // Flip texture horizontally when facing left
             SDL_FlipMode flip = facingRight ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+            // Blink while spawn protection is active (set by the Spawn event)
+            bool blink = gameTime.getTime() < protectedUntil && (SDL_GetTicks() / 100) % 2 == 0;
+            SDL_SetTextureAlphaMod(warriorTexture, blink ? 90 : 255);
             SDL_RenderTextureRotated(renderer, warriorTexture, &warriorSrc, &warriorDst, 0.0, nullptr, flip);
+            SDL_SetTextureAlphaMod(warriorTexture, 255);
+        }
+
+        /* Draw Event HUD: death count, events handled, and recent event messages */
+        {
+            char hud[128];
+            SDL_snprintf(hud, sizeof(hud), "Deaths: %d", deaths);
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, 10.0f, 10.0f, hud);
+            SDL_snprintf(hud, sizeof(hud), "Events handled  Input:%d Collision:%d Death:%d Spawn:%d",
+                         eventCounts[0], eventCounts[1], eventCounts[2], eventCounts[3]);
+            SDL_RenderDebugText(renderer, 10.0f, 24.0f, hud);
+
+            // Drop expired messages, then draw the rest
+            const Uint64 nowTicks = SDL_GetTicks();
+            notices.erase(std::remove_if(notices.begin(), notices.end(),
+                [nowTicks](const Notice& n) { return n.expiresAt <= nowTicks; }), notices.end());
+            SDL_SetRenderDrawColor(renderer, 255, 220, 120, 255);
+            float textY = 44.0f;
+            for (const Notice& n : notices) {
+                SDL_RenderDebugText(renderer, 10.0f, textY, n.text.c_str());
+                textY += 14.0f;
+            }
         }
 
         // Display everything drawn during this frame onto the screen
