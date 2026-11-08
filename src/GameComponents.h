@@ -45,4 +45,9 @@ struct MovingPatternComponent : public Component {
     float speed = 1.0f; // movement speed
 };
 
+// Marks a tombstone left where a player died. Other players can touch it to revive that player.
+struct TombstoneComponent : public Component {
+    int ownerId = 0; // the client who died here
+};
+
 #endif

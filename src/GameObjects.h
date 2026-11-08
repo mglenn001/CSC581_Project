@@ -80,4 +80,14 @@ inline GameObject makeEnemy(float x, float y, float w, float h)
     return obj;
 }
 
+// Creates a tombstone for a player who died. It is a trigger (not solid).
+inline GameObject makeTombstone(int ownerId, float x, float y, float w, float h)
+{
+    GameObject obj("tombstone", ownerId);
+    obj.addComponent<TransformComponent>(x, y, w, h);
+    obj.addComponent<CollidableComponent>().solid = false;
+    obj.addComponent<TombstoneComponent>().ownerId = ownerId;
+    return obj;
+}
+
 #endif

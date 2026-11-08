@@ -1,9 +1,11 @@
 #include "Networking.h"
+#include "NetworkEvent.h"
 
 #include <zmq.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -97,6 +99,20 @@ void networkingThread(SharedData& sharedData, int clientID)
             std::string message = NetFormat::encode(sharedData.networkFormat, clientID, mine);
             publisher.send(zmq::buffer(message), zmq::send_flags::none);
 
+            // Milestone 4: Send events the game thread queued (death, revive, ...).
+            // Events are always sent as text, whatever the position format is.
+            {
+                std::deque<GameEvent> toSend;
+                {
+                    std::lock_guard<std::mutex> lock(sharedData.eventMutex);
+                    toSend.swap(sharedData.outgoingEvents); // take all, release lock fast
+                }
+                for (const GameEvent& event : toSend) {
+                    std::string eventString = NetEvent::encode(event);
+                    publisher.send(zmq::buffer(eventString), zmq::send_flags::none);
+                }
+            }
+
             // Read every message that has arrived. dontwait means we never get
             // stuck waiting on a slow or missing peer.
             while (true) {
@@ -104,6 +120,21 @@ void networkingThread(SharedData& sharedData, int clientID)
                 auto result = subscriber.recv(incoming, zmq::recv_flags::dontwait);
                 if (!result) {
                     break; // nothing more waiting
+                }
+
+                // Milestone 4: An event from another client. Raise it on our own
+                // EventManager; the game thread handles it on its next dispatch.
+                if (NetEvent::isEventMessage(incoming.data(), incoming.size())) {
+                    GameEvent remoteEvent;
+                    if (sharedData.eventManager &&
+                        NetEvent::decode(incoming.data(), incoming.size(), remoteEvent) &&
+                        remoteEvent.sourceId != clientID &&
+                        remoteEvent.sourceId >= 1 && remoteEvent.sourceId <= MAX_PEERS) {
+                        // The sender's Timeline is not comparable to ours, so reset the timestamp
+                        remoteEvent.timestamp = 0;
+                        sharedData.eventManager->raise(std::move(remoteEvent));
+                    }
+                    continue; // done with this message
                 }
 
                 // decode() detects TEXT or BINARY from the message itself

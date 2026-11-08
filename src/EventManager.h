@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-// Milestone 4 Section 1.3: the Replay* types control the replay system.
+// Milestone 4 Section 1.3: The Replay* types control the replay system.
 enum class EventType {
     Input, Collision, Death, Spawn,
     ReplayRecordStart, ReplayRecordStop,
@@ -26,7 +26,7 @@ enum class EventPriority {
 struct GameEvent {
     EventType type;
     EventPriority priority = EventPriority::Normal;
-    int64_t timestamp = 0; // From Timeline::getTime()
+    int64_t timestamp = 0; // from Timeline::getTime()
     int sourceId = 0;
     int targetId = 0;
     std::string detail;
@@ -39,22 +39,22 @@ public:
     using Handler = std::function<void(const GameEvent&)>;
     using SubscriptionId = std::size_t;
 
-    // Registration: game systems and objects subscribe by event type
+    // Registration: Game systems and objects subscribe by event type.
     SubscriptionId subscribe(EventType type, Handler handler) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto id = nextId_++;
         listeners_[type].push_back({id, std::move(handler)});
         return id;
     }
- 
+
     void unsubscribe(EventType type, SubscriptionId id) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& entries = listeners_[type];
         entries.erase(std::remove_if(entries.begin(), entries.end(),
             [id](const Listener& entry) { return entry.first == id; }), entries.end());
     }
- 
-    // Raising: queue, never immediately dispatch (safe from networking thread)
+
+    // Raising: queue, never immediately dispatch (safe from networking thread).
     void raise(GameEvent event) {
         std::lock_guard<std::mutex> lock(mutex_);
         queue_.push(QueuedEvent{std::move(event), nextSequence_++});
@@ -75,7 +75,7 @@ public:
     }
 
     // Set by the game: The function that sends an event over the network.
-    // If it is never set, raisedNetworked simply behaves like raise.
+    // If it is never set, raiseNetworked simply behaves like raise.
     using NetworkSink = std::function<void(const GameEvent&)>;
     void setNetworkSink(NetworkSink sink) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -83,6 +83,8 @@ public:
     }
 
     // Handling: Called on main game thread, no callback executes under lock.
+    // Priority first, then earliest timestamp, then FIFO for equal timestamps.
+    // Events raised by handlers are processed on the next dispatch call.
     void dispatch() {
         std::vector<QueuedEvent> ready;
         {
