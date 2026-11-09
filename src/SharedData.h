@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 
 #include "NetworkFormat.h"
+#include "EventManager.h" // Milestone 4: events shared across the network
 
 // What we need to know to draw another player's warrior
 struct RemotePlayerState {
@@ -43,4 +45,17 @@ struct SharedData {
     std::unordered_map<int, RemotePlayerState> remotePlayers;
     // Protects everything above that is not atomic
     std::mutex playerMutex;
+
+    // Milestone 4: The game thread puts events here; the networking thread sends them.
+    std::deque<GameEvent> outgoingEvents;
+    std::mutex eventMutex; // protects outgoingEvents
+
+    // Events received from other clients are raised on this manager
+    EventManager* eventManager = nullptr;
+
+    // Called by the game thread to send an event to all other clients
+    void queueOutgoingEvent(const GameEvent& event) {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        outgoingEvents.push_back(event);
+    }
 };
