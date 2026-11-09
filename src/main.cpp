@@ -12,6 +12,7 @@
 #include <vector>
 #include <cstdlib>
 #include <string>
+#include <set>
 #include <thread>
 #include <mutex>
  
@@ -435,6 +436,17 @@ int main(int argc, char* argv[]) {
     int revives = 0; // how many other players this client has revived
     bool autoReplay = false; // G key: record every life and replay it when the player dies
  
+    // Dead state: After dying (with other players online) we wait at our tombstone
+    // until another player revives us. Then we respawn at the portal.
+    bool dead = false;
+    bool othersOnline = false; // updated every frame: is anyone else connected?
+    int respawnSpawnId = 1; // which spawn point to use when we come back
+    Uint64 deadSince = 0; // when we died (real ms), for the revive timeout
+    const Uint64 REVIVE_TIMEOUT_MS = 15000; // nobody came: respawn anyway (stops a deadlock if everyone is dead)
+    ReplaySystem* replayPtr = nullptr; // set once the replay system exists (below)
+    bool hasDeferredSpawn = false; // a revive that arrived while a replay was playing
+    GameEvent deferredSpawn{EventType::Spawn};
+ 
     // Tombstones left by dead players (ours and other clients'), one per player
     std::vector<GameObject> tombstones;
     auto removeTombstone = [&](int ownerId) -> bool {
@@ -453,7 +465,7 @@ int main(int argc, char* argv[]) {
                                            y + go::getHeight(player) - h, w, h));
     };
  
-    // Same as raiseEvent, but the event is also sent to every other client
+    // Same as raiseEvent, but the event is ALSO sent to every other client
     auto raiseNetworkedEvent = [&](EventType type, EventPriority priority, const std::string& detail,
                                    float x = 0.0f, float y = 0.0f, int targetId = 0) {
         events.raiseNetworked(GameEvent{type, priority, gameTime.getTime(), clientID, targetId, detail, x, y});
@@ -466,6 +478,16 @@ int main(int argc, char* argv[]) {
         notices.push_back({text, SDL_GetTicks() + 3000}); // show for 3 seconds
         if (notices.size() > 5) notices.erase(notices.begin());
         SDL_Log("%s", text.c_str());
+    };
+ 
+    // Raises a (networked) Spawn event for one of the spawn points
+    auto respawnAt = [&](int spawnId) {
+        const GameObject* spawn = &spawnPoints[0]; // fall back to the first one
+        for (const auto& sp : spawnPoints) {
+            if (sp.getComponent<SpawnPointComponent>()->spawnId == spawnId) spawn = &sp;
+        }
+        raiseNetworkedEvent(EventType::Spawn, EventPriority::High, "portal",
+                            go::getX(*spawn), go::getY(*spawn), spawn->getComponent<SpawnPointComponent>()->spawnId);
     };
  
     // Input event: Moves the player (the key check only raises the event).
@@ -504,6 +526,7 @@ int main(int argc, char* argv[]) {
             } else if (e.targetId == clientID) {
                 if (deaths > 0) deaths--;
                 addNotice(who + " revived you! Deaths: " + std::to_string(deaths));
+                if (dead) respawnAt(respawnSpawnId); // back at the portal
             } else {
                 addNotice(who + " revived Player " + std::to_string(e.targetId));
             }
@@ -527,7 +550,7 @@ int main(int argc, char* argv[]) {
         }
     });
  
-    // DEATH event: Counts the death and asks for a respawn at the right spawn point.
+    // Death event: Counts the death and asks for a respawn at the right spawn point.
     events.subscribe(EventType::Death, [&](const GameEvent& e) {
         eventCounts[2]++;
         // Death from ANOTHER client: just leave a tombstone where they died
@@ -540,22 +563,39 @@ int main(int argc, char* argv[]) {
         deaths++;
         placeTombstone(clientID, e.x, e.y);
         addNotice("Death: " + e.detail);
-        // e.targetId is the spawn point to use (fall back to the first one)
-        const GameObject* spawn = &spawnPoints[0];
-        for (const auto& sp : spawnPoints) {
-            if (sp.getComponent<SpawnPointComponent>()->spawnId == e.targetId) spawn = &sp;
+        // e.targetId is the spawn point we will come back at
+        respawnSpawnId = e.targetId;
+        if (othersOnline) {
+            // Stay dead at the tombstone until another player revives us
+            dead = true;
+            deadSince = SDL_GetTicks();
+            go::setPosition(player, lastGroundX, lastGroundY); // park the player at the tombstone
+            go::setVelocity(player, 0.0f, 0.0f);
+            addNotice("You died. Waiting for a teammate to revive you...");
+        } else {
+            respawnAt(respawnSpawnId); // nobody can revive us: respawn right away
         }
-        raiseEvent(EventType::Spawn, EventPriority::High, "portal",
-                   go::getX(*spawn), go::getY(*spawn), spawn->getComponent<SpawnPointComponent>()->spawnId);
         // In-game replay trigger: our death starts playback of the life that just ended (2x speed).
         // The replay system handles this event, just like it handles the R and V keys.
         if (autoReplay) raiseEvent(EventType::ReplayPlaybackStart, EventPriority::High, "death replay", 2.0f);
     });
  
-    // SPAWN event: Puts the player at the spawn point and moves the camera there.
+    // Spawn event: Puts the player at the spawn point and moves the camera there.
     events.subscribe(EventType::Spawn, [&](const GameEvent& e) {
         eventCounts[3]++;
-        if (e.sourceId != clientID) return; // never move our player for someone else's spawn
+        if (e.sourceId != clientID) {
+            // Another player came back: Their tombstone goes away (already gone if they were revived).
+            if (removeTombstone(e.sourceId)) addNotice("Player " + std::to_string(e.sourceId) + " respawned");
+            return; // never move our player for someone else's spawn
+        }
+        if (replayPtr && replayPtr->isPlaying()) {
+            // A replay is on screen: come back when it ends (see main loop)
+            deferredSpawn = e;
+            hasDeferredSpawn = true;
+            return;
+        }
+        dead = false;
+        removeTombstone(clientID); // our tombstone only exists while we are dead
         go::setPosition(player, e.x, e.y);
         go::setVelocity(player, 0.0f, 0.0f);
         go::setGrounded(player, false);
@@ -588,13 +628,14 @@ int main(int argc, char* argv[]) {
     } else {
         SDL_Log("No client ID given, running offline. Use: ./main <clientID>");
     }
-
+ 
     /* Milestone 4: Replay System */
     // The replay system is controlled only by replay events (see ReplaySystem.h).
     //   R = start / stop recording      V = start / stop playback
     //   G = auto mode: record every life and replay it when you die
     //   - / = during playback, change the replay speed
     ReplaySystem replay(events, [&]() { return gameTime.getTime(); });
+    replayPtr = &replay;
  
     // The replay runs on its own real-time clock, so pausing or slowing the game does not change it
     Timeline replayClock;
@@ -603,9 +644,11 @@ int main(int argc, char* argv[]) {
     const int REPLAY_SLIME_ID = 100;
     const int REPLAY_MOVER_ID = 101; // moving platforms are 101, 102, ...
     const int REPLAY_CAMERA_ID = 200;
+    const int REPLAY_TOMBSTONE_ID = 300; // a tombstone is 300 + the dead player's client ID
  
     // Other players' recorded state while a replay plays
     std::vector<ReplayObjectState> replayOthers;
+    std::vector<ReplayObjectState> replayTombstones; // tombstones that existed in the replayed frame
  
     // What one recorded frame stores. Extra data is packed into vx / vy:
     //   players: vx = facing right (1/0), vy = animation row * 100 + frame
@@ -620,6 +663,10 @@ int main(int argc, char* argv[]) {
             objects.push_back({REPLAY_MOVER_ID + (int)i, go::getX(movingPlatforms[i]), go::getY(movingPlatforms[i]), 0.0f, 0.0f});
         }
         objects.push_back({REPLAY_CAMERA_ID, cameraX, 0.0f, 0.0f, 0.0f});
+        for (const auto& tomb : tombstones) {
+            objects.push_back({REPLAY_TOMBSTONE_ID + tomb.getComponent<TombstoneComponent>()->ownerId,
+                               go::getX(tomb), go::getY(tomb), 0.0f, 0.0f});
+        }
         std::lock_guard<std::mutex> lock(sharedData.playerMutex);
         for (const auto& entry : sharedData.remotePlayers) {
             const RemotePlayerState& r = entry.second;
@@ -631,6 +678,7 @@ int main(int argc, char* argv[]) {
     // How a recorded frame is shown (also used to put the live game back when playback ends)
     replay.setApplyFrame([&](const ReplayFrame& frame) {
         replayOthers.clear();
+        replayTombstones.clear();
         for (const ReplayObjectState& o : frame.objects) {
             if (o.id == clientID) {
                 go::setPosition(player, o.x, o.y);
@@ -647,6 +695,8 @@ int main(int argc, char* argv[]) {
                 cameraX = o.x;
             } else if (o.id >= REPLAY_MOVER_ID && o.id < REPLAY_MOVER_ID + (int)movingPlatforms.size()) {
                 go::setPosition(movingPlatforms[o.id - REPLAY_MOVER_ID], o.x, o.y);
+            } else if (o.id >= REPLAY_TOMBSTONE_ID) {
+                replayTombstones.push_back(o); // a dead player's tombstone
             } else {
                 replayOthers.push_back(o); // another player
             }
@@ -673,6 +723,7 @@ int main(int argc, char* argv[]) {
  
     replay.setStatusCallback([&](const std::string& text) { addNotice(text); });
  
+    std::set<int> knownPlayers; // other players we have seen (to notice when one leaves)
     bool recordKeyWasPressed = false;
     bool playKeyWasPressed = false;
     bool autoKeyWasPressed = false;
@@ -795,6 +846,41 @@ int main(int argc, char* argv[]) {
         // Auto mode: Keep a recording running so a death can be replayed.
         if (autoReplay && !replay.isRecording() && !replay.isPlaying()) replay.requestRecordStart();
  
+        // Disconnects: The networking thread drops a player who stopped sending data.
+        // When someone we knew about is gone, log it and remove their tombstone too.
+        if (online) {
+            std::set<int> nowConnected;
+            {
+                std::lock_guard<std::mutex> lock(sharedData.playerMutex);
+                for (const auto& entry : sharedData.remotePlayers) nowConnected.insert(entry.first);
+            }
+            for (int id : knownPlayers) {
+                if (nowConnected.count(id) == 0) {
+                    addNotice("Player " + std::to_string(id) + " left the game");
+                    removeTombstone(id);
+                }
+            }
+            knownPlayers = nowConnected;
+            othersOnline = !nowConnected.empty();
+        }
+ 
+        // After a replay ends, apply a revive that came in while it was playing
+        if (hasDeferredSpawn && !replay.isPlaying()) {
+            hasDeferredSpawn = false;
+            events.raise(deferredSpawn);
+        }
+ 
+        // Dead and nobody can revive us (everyone left, or the timeout ran out): come back anyway
+        if (dead && !replay.isPlaying()) {
+            if (!othersOnline) {
+                addNotice("No one left to revive you");
+                respawnAt(respawnSpawnId);
+            } else if (SDL_GetTicks() - deadSince > REVIVE_TIMEOUT_MS) {
+                addNotice("No one revived you in time");
+                respawnAt(respawnSpawnId);
+            }
+        }
+ 
         // Called every frame so the replay clock never jumps
         double replayDelta = replayClock.getDeltaTime();
  
@@ -815,9 +901,9 @@ int main(int argc, char* argv[]) {
             moveSpeed = RUN_SPEED;
         }
  
-        // Keys only RAISE Input events. The Input handler (above) moves the player.
+        // Keys only raise Input events. The Input handler (above) moves the player.
         isMoving = false; // the handler sets this back to true if a move key is held
-        if (!gameTime.isPaused()) {
+        if (!gameTime.isPaused() && !dead) {
             if (Input::isKeyPressed(SDL_SCANCODE_A))
                 raiseEvent(EventType::Input, EventPriority::Normal, "left", moveSpeed * deltaTime);
             if (Input::isKeyPressed(SDL_SCANCODE_D))
@@ -1030,7 +1116,7 @@ int main(int argc, char* argv[]) {
         // Touching ANOTHER player's tombstone raises a networked Collision event (revive)
         for (const auto& tomb : tombstones) {
             int owner = tomb.getComponent<TombstoneComponent>()->ownerId;
-            if (owner != clientID && Collision::checkCollision(player, tomb)) {
+            if (!dead && owner != clientID && Collision::checkCollision(player, tomb)) {
                 raiseNetworkedEvent(EventType::Collision, EventPriority::High, "tombstone",
                                     0.0f, 0.0f, owner);
                 break;
@@ -1292,18 +1378,43 @@ int main(int argc, char* argv[]) {
         }
  
         /* Draw Tombstones (left where players died) */
-        for (const auto& tomb : tombstones) {
-            const auto* t = tomb.getComponent<TransformComponent>();
-            SDL_FRect dst = scaleRect({ t->x, t->y, t->width, t->height });
+        auto drawTombstone = [&](int ownerId, float x, float y, float w, float h) {
+            SDL_FRect dst = scaleRect({ x, y, w, h });
             if (stone2Texture) {
                 SDL_SetTextureColorMod(stone2Texture, 170, 180, 220); // cool gray-blue
                 SDL_RenderTexture(renderer, stone2Texture, nullptr, &dst);
                 SDL_SetTextureColorMod(stone2Texture, 255, 255, 255);
             }
-            std::string label = "RIP P" + std::to_string(tomb.getComponent<TombstoneComponent>()->ownerId);
+            std::string label = "RIP P" + std::to_string(ownerId);
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL_RenderDebugText(renderer, dst.x, dst.y - 12.0f, label.c_str());
+        };
+        if (replay.isPlaying()) {
+            // During a replay, show the tombstones that existed when it was recorded
+            for (const ReplayObjectState& o : replayTombstones) {
+                drawTombstone(o.id - REPLAY_TOMBSTONE_ID, o.x, o.y, 40.0f, 50.0f);
+            }
+        } else {
+            for (const auto& tomb : tombstones) {
+                const auto* t = tomb.getComponent<TransformComponent>();
+                drawTombstone(tomb.getComponent<TombstoneComponent>()->ownerId, t->x, t->y, t->width, t->height);
+            }
         }
+ 
+        // Who is dead right now? (a tombstone exists for them). In a replay this comes
+        // from the recorded frame. Dead players' characters are not drawn.
+        auto isDeadPlayer = [&](int playerId) {
+            if (replay.isPlaying()) {
+                for (const ReplayObjectState& o : replayTombstones) {
+                    if (o.id - REPLAY_TOMBSTONE_ID == playerId) return true;
+                }
+                return false;
+            }
+            for (const auto& tomb : tombstones) {
+                if (tomb.getComponent<TombstoneComponent>()->ownerId == playerId) return true;
+            }
+            return false;
+        };
  
         /* Draw Slime Enemy */
         if (slimeTexture) {
@@ -1346,6 +1457,9 @@ int main(int argc, char* argv[]) {
             for (const auto& entry : others) {
                 const RemotePlayerState& other = entry.second;
  
+                // A player with a tombstone is dead: don't draw their character
+                if (isDeadPlayer(entry.first)) continue;
+ 
                 SDL_FRect otherSrc = {
                     (float)(other.frame * WARRIOR_FRAME_W),
                     (float)(other.row * WARRIOR_FRAME_H),
@@ -1362,8 +1476,8 @@ int main(int argc, char* argv[]) {
             SDL_SetTextureColorMod(warriorTexture, 255, 255, 255);
         }
  
-        /* Draw Warrior Player */
-        if (warriorTexture) {
+        /* Draw Warrior Player (hidden while dead) */
+        if (warriorTexture && !(replay.isPlaying() ? isDeadPlayer(clientID) : dead)) {
             // Cut out the current active animation frame based on row and column
             SDL_FRect warriorSrc = {
                 (float)(warriorCurrentFrame * WARRIOR_FRAME_W),
@@ -1387,7 +1501,7 @@ int main(int argc, char* argv[]) {
             SDL_SetTextureAlphaMod(warriorTexture, 255);
         }
  
-        // Draw Event HUD: Death count, events handled, and recent event messages.
+        /* Draw Event HUD: Death count, events handled, and recent event messages. */
         {
             char hud[128];
             SDL_snprintf(hud, sizeof(hud), "Deaths: %d   Revives: %d", deaths, revives);
@@ -1396,6 +1510,19 @@ int main(int argc, char* argv[]) {
             SDL_snprintf(hud, sizeof(hud), "Events handled  Input:%d Collision:%d Death:%d Spawn:%d",
                          eventCounts[0], eventCounts[1], eventCounts[2], eventCounts[3]);
             SDL_RenderDebugText(renderer, 10.0f, 24.0f, hud);
+ 
+            // While dead, tell the player what to wait for
+            if (dead && !replay.isPlaying()) {
+                int secondsLeft = (int)((REVIVE_TIMEOUT_MS - std::min<Uint64>(REVIVE_TIMEOUT_MS, SDL_GetTicks() - deadSince)) / 1000) + 1;
+                char deadText[96];
+                SDL_snprintf(deadText, sizeof(deadText), "YOU DIED - wait for a teammate to revive you (%ds)", secondsLeft);
+                int w = 0, h = 0;
+                SDL_GetRenderOutputSize(renderer, &w, &h);
+                SDL_SetRenderDrawColor(renderer, 255, 90, 90, 255);
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f); // bigger text
+                SDL_RenderDebugText(renderer, std::max(4.0f, w / 4.0f - (float)SDL_strlen(deadText) * 4.0f), h / 8.0f, deadText);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
  
             // Replay status line (bottom-left)
             char replayText[160];

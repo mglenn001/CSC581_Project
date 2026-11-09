@@ -105,7 +105,8 @@ You should see the game screen successfully open.
 * **T** — Toggle Resolution Scaling (Proportional vs. Pixel)
 * **P** — Pause / Unpause
 * **F** — Freeze / Unfreeze
-* **+/-** — Increase / Decrease game speed and replay speed
+* **+/-** — Increase / Decrease game speed
+* **-/=** — Decrease / Increase replay speed
 * **R** — Start / Stop recording a replay
 * **V** — Play the replay (or skip it while it plays)
 * **G** — Auto death replay on / off
