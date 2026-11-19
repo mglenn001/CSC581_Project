@@ -282,7 +282,14 @@ int main(int argc, char* argv[]) {
     /* Setup Player and Game Objects */
     // The player is a GameObject built from components (position, velocity,
     // gravity, collision, network). Position is in WORLD coordinates.
-    GameObject player = makePlayer(clientID, START_X, START_Y, 80.0f, 64.0f);
+    const float WARRIOR_SCALE = 1.5f;
+    GameObject player = makePlayer(
+        clientID, 
+        START_X, 
+        START_Y, 
+        (float)WARRIOR_FRAME_W * WARRIOR_SCALE, 
+        (float)WARRIOR_FRAME_H * WARRIOR_SCALE
+    );
  
     // Hidden spawn points (no RenderableComponent, so they are never drawn)
     std::vector<GameObject> spawnPoints;
