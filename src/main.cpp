@@ -4,7 +4,7 @@
     UnityID: mglenn2
     Team: 8
     Class: CSC 581 - Game Engine Foundations
-    Date: 11/9/2026
+    Date: 12/1/2026
 */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
