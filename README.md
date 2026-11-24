@@ -9,6 +9,14 @@ Sabah Afroz, safroz
 
 Tram Nguyen, tnnguy22
 
+## Games
+
+**1. Jungle**: A scrolling 2D platformer where you race against a 60-second timer to reach the finish flag while avoiding enimies, death zones, and falling stars.
+
+**2. Space Invaders**: A classic arcade shooter built with the engine's core systems.
+
+**3. Bubble Shooter**: An arcade puzzle shooter built with the engine's core systems.
+
 ##  Setup Instructions
 
 Follow these steps to clone, build, and run the project on your machine:
@@ -72,11 +80,11 @@ make
 
 ----------
 
-### 5. Run the game
+### 5. Run the games
 
 No need to run `./server` command. Every player runs the game as a peer with its own ID.
 
-You can run up to **4** clients (`./main 1` to `./main 4`).
+You can run up to **4** clients (`./main 1` to `./main 4`) for the Jungle game.
 
 Optional: add a data format after the ID. `text` is the default.
 
@@ -94,6 +102,24 @@ Optional: add a data format after the ID. `text` is the default.
 
 ```
 
+To play the Space Invaders game:
+
+#### On **a different terminal**:
+
+```bash
+./space_invaders
+
+```
+
+To play the Bubble Shooter game:
+
+#### On **a different terminal**:
+
+```bash
+./bubble_shooter
+
+```
+
 You should see the game screen successfully open.
 
 ## Game Control
@@ -101,6 +127,8 @@ You should see the game screen successfully open.
 * **A** — Move Left
 * **D** — Move Right
 * **W** — Jump
+* **Spacebar** — Shoot
+* **Mouse/Trackpad** — Move and shoot
 * **Shift** — Hold to Run
 * **T** — Toggle Resolution Scaling (Proportional vs. Pixel)
 * **P** — Pause / Unpause
@@ -110,6 +138,7 @@ You should see the game screen successfully open.
 * **R** — Start / Stop recording a replay
 * **V** — Play the replay (or skip it while it plays)
 * **G** — Auto death replay on / off
+* **Enter/Retrun** — To restart the game
 
 ## Resources
 
@@ -118,3 +147,5 @@ https://gandalfhardcore.itch.io/2d-pixel-art-male-and-female-character
 https://free-game-assets.itch.io/free-swamp-2d-tileset-pixel-art
 
 https://issdev.delta.ncsu.edu/courses/csc481-sprite-selector/
+
+https://craftpix.net/freebies/free-pixel-magic-sprite-effects-pack/

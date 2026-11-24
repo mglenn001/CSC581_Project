@@ -57,6 +57,28 @@ const int WARRIOR_FRAME_H = 64;
 const int SLIME_FRAME_W = 32;
 const int SLIME_FRAME_H = 32;
 const int SLIME_WALK_FRAMES = 5;
+
+// Goal timer and finish flag constants
+const float GOAL_TIME_LIMIT = 60.0f;
+const int FLAG_FRAME_COUNT = 4;
+const float FLAG_FPS = 8.0f;
+
+// Falling star hazard constants
+const int STARFALL_FRAME_COUNT = 4;
+const float STARFALL_FPS = 10.0f;
+
+struct StarfallHazard {
+    float x;
+    float y;
+    float w;
+    float h;
+    float vy;
+    float animTimer;
+    int frame;
+    bool impacting;
+    float impactTimer;
+    bool expired;
+};
  
 // Tracks what the character is currently doing (for animation purposes)
 enum class CharacterState {
@@ -73,6 +95,10 @@ struct FrameRenderTask {
     float slimeY;
     int slimeFrame;
     float slimeDir;
+    float slime2X;
+    float slime2Y;
+    int slime2Frame;
+    float slime2Dir;
     int warriorRow;
     int warriorFrame;
 };
@@ -80,23 +106,31 @@ struct FrameRenderTask {
 // Worker function: Concurrently computes animated render parameters for game objects
 void prepareFrameData(
     float slimeX, float slimeY, float slimeDir, float slimeDeltaTime, float& slimeAnimTimer,
+    float slime2X, float slime2Y, float slime2Dir, float& slime2AnimTimer,
     float deltaTime, float warriorAnimTimer, int warriorCurrentFrame, int maxFrames, float animFPS,
     FrameRenderTask& taskResult, std::mutex& taskMutex) 
 {
-    // Slime movement & animation frame calculation
+    // Slime 1 movement & animation
     float computedSlimeX = slimeX + (slimeDir * 60.0f * slimeDeltaTime);
-    
     slimeAnimTimer += slimeDeltaTime;
     int computedSlimeFrame = (int)(slimeAnimTimer / (1.0f / 8.0f)) % SLIME_WALK_FRAMES;
     if (slimeAnimTimer >= (1.0f / 8.0f)) {
-        slimeAnimTimer = 0.0f; // Reset timer
+        slimeAnimTimer = 0.0f;
+    }
+
+    // Slime 2 movement & animation
+    float computedSlime2X = slime2X + (slime2Dir * 75.0f * slimeDeltaTime);
+    slime2AnimTimer += slimeDeltaTime;
+    int computedSlime2Frame = (int)(slime2AnimTimer / (1.0f / 8.0f)) % SLIME_WALK_FRAMES;
+    if (slime2AnimTimer >= (1.0f / 8.0f)) {
+        slime2AnimTimer = 0.0f;
     }
  
     // Warrior animation frame calculation
     warriorAnimTimer += deltaTime;
     int computedWarriorFrame = warriorCurrentFrame;
     if (warriorAnimTimer >= (1.0f / animFPS)) {
-        warriorAnimTimer = 0.0f; // Reset timer
+        warriorAnimTimer = 0.0f;
         computedWarriorFrame = (warriorCurrentFrame + 1) % maxFrames;
     }
  
@@ -106,6 +140,10 @@ void prepareFrameData(
     taskResult.slimeY = slimeY;
     taskResult.slimeFrame = computedSlimeFrame;
     taskResult.slimeDir = slimeDir;
+    taskResult.slime2X = computedSlime2X;
+    taskResult.slime2Y = slime2Y;
+    taskResult.slime2Frame = computedSlime2Frame;
+    taskResult.slime2Dir = slime2Dir;
     taskResult.warriorFrame = computedWarriorFrame;
 }
  
@@ -191,6 +229,12 @@ int main(int argc, char* argv[]) {
     const float START_Y = groundY - 128.0f;
     const float SPAWN2_X = 1700.0f;
     const float SPAWN2_Y = groundY - 128.0f;
+
+    // Finish flag position on the right side of the level
+    const float FLAG_X = 3680.0f;
+    const float FLAG_W = 64.0f;
+    const float FLAG_H = 128.0f;
+    const float FLAG_Y = groundY - FLAG_H;
  
     /* Loading Image Assets (Textures) */
     // Load background image
@@ -209,6 +253,20 @@ int main(int argc, char* argv[]) {
     SDL_Texture* slimeTexture = IMG_LoadTexture(renderer, "../assets/slime.png");
     if (!slimeTexture) {
         SDL_Log("Could not load slime.png: %s", SDL_GetError());
+    }
+
+    // Load finish flag and falling star textures
+    SDL_Texture* flagTexture = IMG_LoadTexture(renderer, "../assets/Flag.png");
+    if (!flagTexture) {
+        SDL_Log("Could not load Flag.png: %s", SDL_GetError());
+    }
+    SDL_Texture* starfallTexture = IMG_LoadTexture(renderer, "../assets/starfall.png");
+    if (!starfallTexture) {
+        SDL_Log("Could not load starfall.png: %s", SDL_GetError());
+    }
+    SDL_Texture* starfall2Texture = IMG_LoadTexture(renderer, "../assets/starfall2.png");
+    if (!starfall2Texture) {
+        SDL_Log("Could not load starfall2.png: %s", SDL_GetError());
     }
  
     // Load trees
@@ -252,6 +310,9 @@ int main(int argc, char* argv[]) {
     // Use "Nearest Neighbor" filtering so pixel art stays sharp and crisp when resized
     if (warriorTexture) SDL_SetTextureScaleMode(warriorTexture, SDL_SCALEMODE_NEAREST);
     if (slimeTexture) SDL_SetTextureScaleMode(slimeTexture, SDL_SCALEMODE_NEAREST);
+    if (flagTexture) SDL_SetTextureScaleMode(flagTexture, SDL_SCALEMODE_NEAREST);
+    if (starfallTexture) SDL_SetTextureScaleMode(starfallTexture, SDL_SCALEMODE_NEAREST);
+    if (starfall2Texture) SDL_SetTextureScaleMode(starfall2Texture, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureScaleMode(bgTexture, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureScaleMode(willowTexture, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureScaleMode(tile01Texture, SDL_SCALEMODE_NEAREST);
@@ -390,14 +451,33 @@ int main(int argc, char* argv[]) {
     // Physics manager instance for applying movement and gravity updates
     Physics physics;
  
-    // Slime enemy (a GameObject) and its walking state
+    // Slime enemies and their patrol state
     GameObject slime = makeEnemy(600.0f, groundY - 48.0f, (float)SLIME_FRAME_W * 1.5f, (float)SLIME_FRAME_H * 1.5f);
-    float slimeX = 600.0f; // starting X position
-    float slimeY = groundY - 48.0f; // starting Y position (standing on floor)
-    float slimeDir = 1.0f; // direction: 1 = walking right, -1 = walking left
-    float slimeSpeed = 60.0f; // speed in pixels per second
-    float slimeAnimTimer = 0.0f; // timer for cycling through slime walk frames
-    int slimeCurrentFrame = 0; // current frame index to draw
+    float slimeX = 600.0f;
+    float slimeY = groundY - 48.0f;
+    float slimeDir = 1.0f;
+    float slimeAnimTimer = 0.0f;
+    int slimeCurrentFrame = 0;
+
+    // Second slime past the second portal (SPAWN2_X = 1700)
+    GameObject slime2 = makeEnemy(2850.0f, groundY - 48.0f, (float)SLIME_FRAME_W * 1.5f, (float)SLIME_FRAME_H * 1.5f);
+    float slime2X = 2850.0f;
+    float slime2Y = groundY - 48.0f;
+    float slime2Dir = -1.0f;
+    float slime2AnimTimer = 0.0f;
+    int slime2CurrentFrame = 0;
+
+    // Goal timer and finish flag animation state
+    float timeRemaining = GOAL_TIME_LIMIT;
+    bool goalReached = false;
+    bool timeExpired = false;
+    float flagAnimTimer = 0.0f;
+    int flagCurrentFrame = 0;
+
+    // Falling star hazards
+    std::vector<StarfallHazard> starfalls;
+    float starSpawnTimer = 1.2f;
+    std::srand(12345);
  
     // Warrior player animation variables
     float warriorAnimTimer = 0.0f; // timer to control animation speed
@@ -422,6 +502,7 @@ int main(int argc, char* argv[]) {
     bool minusKeyWasPressed = false;
     bool plusKeyWasPressed = false;
     bool freezeSlimeKeyWasPressed = false;
+    bool restartKeyWasPressed = false;
  
     /* Milestone 4: Event System Setup */
     // Gameplay does not act directly. Code that DETECTS something raises an event,
@@ -496,6 +577,26 @@ int main(int argc, char* argv[]) {
         raiseNetworkedEvent(EventType::Spawn, EventPriority::High, "portal",
                             go::getX(*spawn), go::getY(*spawn), spawn->getComponent<SpawnPointComponent>()->spawnId);
     };
+
+    // Resets the timed run back to the start
+    auto resetGoalRun = [&]() {
+        timeRemaining = GOAL_TIME_LIMIT;
+        goalReached = false;
+        timeExpired = false;
+        deathPending = false;
+        dead = false;
+        starfalls.clear();
+        starSpawnTimer = 1.0f;
+        removeTombstone(clientID);
+        go::setPosition(player, START_X, START_Y);
+        go::setVelocity(player, 0.0f, 0.0f);
+        go::setGrounded(player, false);
+        lastGroundX = START_X;
+        lastGroundY = START_Y;
+        cameraX = 0.0f;
+        protectedUntil = gameTime.getTime() + SPAWN_PROTECTION_MS;
+        addNotice("Run restarted! Timer: 60.0s");
+    };
  
     // Input event: Moves the player (the key check only raises the event).
     events.subscribe(EventType::Input, [&](const GameEvent& e) {
@@ -541,13 +642,20 @@ int main(int argc, char* argv[]) {
         }
  
         if (e.sourceId != clientID) return; // the rest are local-only collisions
+        if (e.detail == "flag") {
+            if (!goalReached && !timeExpired && !dead) {
+                goalReached = true;
+                addNotice("Goal reached! Flag captured!");
+            }
+            return;
+        }
         if (deathPending) return; // already dying
-        if (e.detail == "slime") {
+        if (e.detail == "slime" || e.detail == "starfall") {
             if (gameTime.getTime() < protectedUntil) return; // spawn protection
-            addNotice("Collision: touched slime");
+            addNotice(e.detail == "slime" ? "Collision: touched slime" : "Collision: hit by falling star");
             deathPending = true;
             // Death is networked: x,y is where our tombstone will appear on every client.
-            raiseNetworkedEvent(EventType::Death, EventPriority::Critical, "slime",
+            raiseNetworkedEvent(EventType::Death, EventPriority::Critical, e.detail,
                                 lastGroundX, lastGroundY, 1); // respawn at spawn 1
         } else if (e.detail == "deathzone") {
             addNotice("Collision: entered death zone");
@@ -649,6 +757,7 @@ int main(int argc, char* argv[]) {
  
     // IDs for objects in a recorded frame (players use their client ID, 1-4)
     const int REPLAY_SLIME_ID = 100;
+    const int REPLAY_SLIME2_ID = 150;
     const int REPLAY_MOVER_ID = 101; // moving platforms are 101, 102, ...
     const int REPLAY_CAMERA_ID = 200;
     const int REPLAY_TOMBSTONE_ID = 300; // a tombstone is 300 + the dead player's client ID
@@ -666,6 +775,7 @@ int main(int argc, char* argv[]) {
         objects.push_back({clientID, go::getX(player), go::getY(player),
                            facingRight ? 1.0f : 0.0f, (float)(row * 100 + warriorCurrentFrame)});
         objects.push_back({REPLAY_SLIME_ID, slimeX, slimeY, slimeDir, (float)slimeCurrentFrame});
+        objects.push_back({REPLAY_SLIME2_ID, slime2X, slime2Y, slime2Dir, (float)slime2CurrentFrame});
         for (size_t i = 0; i < movingPlatforms.size(); ++i) {
             objects.push_back({REPLAY_MOVER_ID + (int)i, go::getX(movingPlatforms[i]), go::getY(movingPlatforms[i]), 0.0f, 0.0f});
         }
@@ -698,6 +808,11 @@ int main(int argc, char* argv[]) {
                 slimeDir = o.vx;
                 slimeCurrentFrame = (int)o.vy;
                 go::setPosition(slime, o.x, o.y);
+            } else if (o.id == REPLAY_SLIME2_ID) {
+                slime2X = o.x;
+                slime2Dir = o.vx;
+                slime2CurrentFrame = (int)o.vy;
+                go::setPosition(slime2, o.x, o.y);
             } else if (o.id == REPLAY_CAMERA_ID) {
                 cameraX = o.x;
             } else if (o.id >= REPLAY_MOVER_ID && o.id < REPLAY_MOVER_ID + (int)movingPlatforms.size()) {
@@ -834,9 +949,9 @@ int main(int argc, char* argv[]) {
         }
         autoKeyWasPressed = autoKeyIsPressed;
  
-        // 'R' starts / stops recording (manual mode)
+        // 'R' starts / stops recording (manual mode) when not on the win/time-up screen
         bool recordKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_R);
-        if (recordKeyIsPressed && !recordKeyWasPressed && !autoReplay && !replay.isPlaying()) {
+        if (recordKeyIsPressed && !recordKeyWasPressed && !autoReplay && !replay.isPlaying() && !goalReached && !timeExpired) {
             if (replay.isRecording()) replay.requestRecordStop();
             else replay.requestRecordStart();
         }
@@ -849,6 +964,14 @@ int main(int argc, char* argv[]) {
             else if (!autoReplay) replay.requestPlaybackStart(1.0f);
         }
         playKeyWasPressed = playKeyIsPressed;
+
+        // Press Enter (or R when round ended) to restart the timed run
+        bool restartKeyIsPressed = Input::isKeyPressed(SDL_SCANCODE_RETURN) ||
+                                   ((goalReached || timeExpired) && Input::isKeyPressed(SDL_SCANCODE_R));
+        if (restartKeyIsPressed && !restartKeyWasPressed && (goalReached || timeExpired)) {
+            resetGoalRun();
+        }
+        restartKeyWasPressed = restartKeyIsPressed;
  
         // Auto mode: Keep a recording running so a death can be replayed.
         if (autoReplay && !replay.isRecording() && !replay.isPlaying()) replay.requestRecordStart();
@@ -894,6 +1017,20 @@ int main(int argc, char* argv[]) {
         // While a replay plays, the live game is frozen: no input, physics, collisions or
         // movers. The replay system moves the objects instead.
         if (!replay.isPlaying()) {
+
+        // Animate finish flag even if goal is reached
+        flagAnimTimer += deltaTime;
+        flagCurrentFrame = (int)(flagAnimTimer * FLAG_FPS) % FLAG_FRAME_COUNT;
+
+        // Countdown goal timer during active play
+        if (!goalReached && !timeExpired) {
+            timeRemaining -= deltaTime;
+            if (timeRemaining <= 0.0f) {
+                timeRemaining = 0.0f;
+                timeExpired = true;
+                addNotice("Time's up! Press Enter to retry.");
+            }
+        }
  
         // Player inputs & movement
         const float WALK_SPEED = 200.0f;
@@ -910,7 +1047,7 @@ int main(int argc, char* argv[]) {
  
         // Keys only raise Input events. The Input handler (above) moves the player.
         isMoving = false; // the handler sets this back to true if a move key is held
-        if (!gameTime.isPaused() && !dead) {
+        if (!gameTime.isPaused() && !dead && !goalReached && !timeExpired) {
             if (Input::isKeyPressed(SDL_SCANCODE_A))
                 raiseEvent(EventType::Input, EventPriority::Normal, "left", moveSpeed * deltaTime);
             if (Input::isKeyPressed(SDL_SCANCODE_D))
@@ -1095,6 +1232,7 @@ int main(int argc, char* argv[]) {
         std::thread framePrepThread(
             prepareFrameData,
             slimeX, slimeY, slimeDir, slimeDeltaTime, std::ref(slimeAnimTimer),
+            slime2X, slime2Y, slime2Dir, std::ref(slime2AnimTimer),
             deltaTime, std::ref(warriorAnimTimer), warriorCurrentFrame, maxFrames, animFPS,
             std::ref(preparedTask), std::ref(taskMutex)
         );
@@ -1107,17 +1245,86 @@ int main(int argc, char* argv[]) {
         slimeX = preparedTask.slimeX;
         slimeCurrentFrame = preparedTask.slimeFrame;
         go::setPosition(slime, slimeX, slimeY);
+        slime2X = preparedTask.slime2X;
+        slime2CurrentFrame = preparedTask.slime2Frame;
+        go::setPosition(slime2, slime2X, slime2Y);
  
-        // Turn around slime at boundaries
+        // Turn around slime 1 at boundaries
         if (slimeX > 800.0f) {
             slimeDir = -1.0f;
         } else if (slimeX < 550.0f) {
             slimeDir = 1.0f;
         }
+
+        // Turn around slime 2 at boundaries (past second portal)
+        if (slime2X > 3150.0f) {
+            slime2Dir = -1.0f;
+        } else if (slime2X < 2800.0f) {
+            slime2Dir = 1.0f;
+        }
+
+        // Update falling stars and check player collision
+        if (!goalReached && !timeExpired) {
+            starSpawnTimer -= deltaTime;
+            if (starSpawnTimer <= 0.0f) {
+                starSpawnTimer = 1.4f;
+                float spanStart = cameraX + 120.0f;
+                float spanWidth = std::max(200.0f, (float)actualWidth - 240.0f);
+                float spawnX = std::clamp(spanStart + (float)(std::rand() % 1000) / 1000.0f * spanWidth,
+                                          120.0f, WORLD_WIDTH - 160.0f);
+                starfalls.push_back({spawnX, -48.0f, 48.0f, 48.0f, 340.0f, 0.0f, 0, false, 0.0f, false});
+            }
+        }
+
+        playerX = go::getX(player);
+        playerY = go::getY(player);
+        playerW = go::getWidth(player);
+        playerH = go::getHeight(player);
+
+        for (auto& star : starfalls) {
+            if (star.expired) continue;
+            if (!star.impacting) {
+                star.y += star.vy * deltaTime;
+                star.animTimer += deltaTime;
+                star.frame = (int)(star.animTimer * STARFALL_FPS) % STARFALL_FRAME_COUNT;
+
+                bool hitsPlayer = !dead && (playerX < star.x + star.w) && (playerX + playerW > star.x) &&
+                                  (playerY < star.y + star.h) && (playerY + playerH > star.y);
+                if (hitsPlayer) {
+                    raiseEvent(EventType::Collision, EventPriority::High, "starfall");
+                    star.impacting = true;
+                    star.impactTimer = 0.35f;
+                    star.frame = 0;
+                } else if (star.y + star.h >= groundY) {
+                    star.y = groundY - star.h;
+                    star.impacting = true;
+                    star.impactTimer = 0.35f;
+                    star.frame = 0;
+                }
+            } else {
+                star.impactTimer -= deltaTime;
+                star.frame = std::min(STARFALL_FRAME_COUNT - 1,
+                                      (int)((0.35f - std::max(0.0f, star.impactTimer)) * STARFALL_FPS));
+                if (star.impactTimer <= 0.0f) {
+                    star.expired = true;
+                }
+            }
+        }
+        starfalls.erase(std::remove_if(starfalls.begin(), starfalls.end(),
+            [](const StarfallHazard& s) { return s.expired; }), starfalls.end());
  
-        // Enemy collision check: touching the slime raises a Collision event
-        if (Collision::checkCollision(player, slime)) {
+        // Enemy collision checks: touching either slime raises a Collision event
+        if (Collision::checkCollision(player, slime) || Collision::checkCollision(player, slime2)) {
             raiseEvent(EventType::Collision, EventPriority::High, "slime");
+        }
+
+        // Finish flag collision check
+        if (!goalReached && !timeExpired && !dead) {
+            bool hitsFlag = (playerX < FLAG_X + FLAG_W) && (playerX + playerW > FLAG_X) &&
+                            (playerY < FLAG_Y + FLAG_H) && (playerY + playerH > FLAG_Y);
+            if (hitsFlag) {
+                raiseEvent(EventType::Collision, EventPriority::High, "flag");
+            }
         }
  
         // Touching ANOTHER player's tombstone raises a networked Collision event (revive)
@@ -1383,6 +1590,17 @@ int main(int argc, char* argv[]) {
                 SDL_RenderTexture(renderer, portalTexture, &portalSrc, &portalDst);
             }
         }
+
+        /* Draw Finish Flag (Flag.png) */
+        if (flagTexture) {
+            float texW = 0.0f, texH = 0.0f;
+            SDL_GetTextureSize(flagTexture, &texW, &texH);
+            float fw = (texW > 0.0f) ? texW / FLAG_FRAME_COUNT : 32.0f;
+            float fh = (texH > 0.0f) ? texH : 64.0f;
+            SDL_FRect flagSrc = { (float)(flagCurrentFrame * fw), 0.0f, fw, fh };
+            SDL_FRect flagDst = scaleRect({ FLAG_X, FLAG_Y, FLAG_W, FLAG_H });
+            SDL_RenderTexture(renderer, flagTexture, &flagSrc, &flagDst);
+        }
  
         /* Draw Tombstones (left where players died) */
         auto drawTombstone = [&](int ownerId, float x, float y, float w, float h) {
@@ -1423,25 +1641,50 @@ int main(int argc, char* argv[]) {
             return false;
         };
  
-        /* Draw Slime Enemy */
+        /* Draw Slime Enemies */
         if (slimeTexture) {
-            // Cut out the current active frame from the slime image grid
             SDL_FRect slimeSrc = {
                 (float)(slimeCurrentFrame * SLIME_FRAME_W),
                 0.0f,
                 (float)SLIME_FRAME_W,
                 (float)SLIME_FRAME_H
             };
-            // Destination rectangle on screen
             SDL_FRect slimeDst = scaleRect({
                 go::getX(slime),
                 go::getY(slime),
                 go::getWidth(slime),
                 go::getHeight(slime)
             });
-            // Flip texture horizontally when walking left
             SDL_FlipMode slimeFlip = (slimeDir < 0.0f) ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
             SDL_RenderTextureRotated(renderer, slimeTexture, &slimeSrc, &slimeDst, 0.0, nullptr, slimeFlip);
+
+            SDL_FRect slime2Src = {
+                (float)(slime2CurrentFrame * SLIME_FRAME_W),
+                0.0f,
+                (float)SLIME_FRAME_W,
+                (float)SLIME_FRAME_H
+            };
+            SDL_FRect slime2Dst = scaleRect({
+                go::getX(slime2),
+                go::getY(slime2),
+                go::getWidth(slime2),
+                go::getHeight(slime2)
+            });
+            SDL_FlipMode slime2Flip = (slime2Dir < 0.0f) ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+            SDL_RenderTextureRotated(renderer, slimeTexture, &slime2Src, &slime2Dst, 0.0, nullptr, slime2Flip);
+        }
+
+        /* Draw Falling Stars (starfall.png / starfall2.png) */
+        for (const auto& star : starfalls) {
+            SDL_Texture* tex = star.impacting ? starfall2Texture : starfallTexture;
+            if (!tex) continue;
+            float texW = 0.0f, texH = 0.0f;
+            SDL_GetTextureSize(tex, &texW, &texH);
+            float fw = (texW > 0.0f) ? texW / STARFALL_FRAME_COUNT : 32.0f;
+            float fh = (texH > 0.0f) ? texH : 32.0f;
+            SDL_FRect src = { (float)(star.frame * fw), 0.0f, fw, fh };
+            SDL_FRect dst = scaleRect({ star.x, star.y, star.w, star.h });
+            SDL_RenderTexture(renderer, tex, &src, &dst);
         }
  
         /* Draw Other Players (controlled by the other clients) */
@@ -1510,13 +1753,30 @@ int main(int argc, char* argv[]) {
  
         /* Draw Event HUD: Death count, events handled, and recent event messages. */
         {
-            char hud[128];
-            SDL_snprintf(hud, sizeof(hud), "Deaths: %d   Revives: %d", deaths, revives);
+            char hud[160];
+            SDL_snprintf(hud, sizeof(hud), "Time: %.1fs   Deaths: %d   Revives: %d", timeRemaining, deaths, revives);
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL_RenderDebugText(renderer, 10.0f, 10.0f, hud);
             SDL_snprintf(hud, sizeof(hud), "Events handled  Input:%d Collision:%d Death:%d Spawn:%d",
                          eventCounts[0], eventCounts[1], eventCounts[2], eventCounts[3]);
             SDL_RenderDebugText(renderer, 10.0f, 24.0f, hud);
+
+            // Goal reached or time expired banner
+            if (goalReached || timeExpired) {
+                int w = 0, h = 0;
+                SDL_GetRenderOutputSize(renderer, &w, &h);
+                char endText[96];
+                if (goalReached) {
+                    SDL_snprintf(endText, sizeof(endText), "GOAL COMPLETE! (%.1fs left) - Press Enter to restart", timeRemaining);
+                    SDL_SetRenderDrawColor(renderer, 120, 255, 140, 255);
+                } else {
+                    SDL_snprintf(endText, sizeof(endText), "TIME UP! - Press Enter to restart");
+                    SDL_SetRenderDrawColor(renderer, 255, 110, 110, 255);
+                }
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_RenderDebugText(renderer, std::max(4.0f, w / 4.0f - (float)SDL_strlen(endText) * 4.0f), h / 8.0f, endText);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
  
             // While dead, tell the player what to wait for
             if (dead && !replay.isPlaying()) {
@@ -1575,6 +1835,9 @@ int main(int argc, char* argv[]) {
     // Clean up and exit
     if (warriorTexture) SDL_DestroyTexture(warriorTexture);
     if (slimeTexture) SDL_DestroyTexture(slimeTexture);
+    if (flagTexture) SDL_DestroyTexture(flagTexture);
+    if (starfallTexture) SDL_DestroyTexture(starfallTexture);
+    if (starfall2Texture) SDL_DestroyTexture(starfall2Texture);
     if (portalTexture) SDL_DestroyTexture(portalTexture);
     if (bgTexture) SDL_DestroyTexture(bgTexture);
     if (willowTexture) SDL_DestroyTexture(willowTexture);
